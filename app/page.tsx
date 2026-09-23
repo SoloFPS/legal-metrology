@@ -1,5 +1,8 @@
 "use client";
 
+import Link from "next/link";
+import { ChevronRight } from "lucide-react"; // add to your existing lucide-react import line
+
 import { useRef, useState } from "react";
 import {
   Upload,
@@ -71,9 +74,7 @@ type AnalysisResult = {
 };
 
 function humanize(value: string) {
-  return value
-    .replace(/_/g, " ")
-    .replace(/\b\w/g, (c) => c.toUpperCase());
+  return value.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
 function formatValue(value: any): { text: string; isPlaceholder: boolean } {
@@ -614,6 +615,7 @@ export default function Home() {
                           return (
                             <FieldRow
                               key={label}
+                              fieldKey={key}
                               label={label}
                               value={text}
                               missing={missing}
@@ -690,8 +692,7 @@ export default function Home() {
                             lines={
                               analysisResult.extracted_data
                                 .raw_text_detected_primary ??
-                              analysisResult.extracted_data
-                                .raw_text_detected ??
+                              analysisResult.extracted_data.raw_text_detected ??
                               []
                             }
                           />
@@ -735,25 +736,31 @@ function FieldRow({
   missing,
   isPlaceholder,
   legalBasis,
+  fieldKey,
 }: {
   label: string;
   value: string;
   missing: boolean;
   isPlaceholder: boolean;
   legalBasis?: string;
+  fieldKey?: string;
 }) {
   const status: "pass" | "warning" = missing ? "warning" : "pass";
 
-  return (
-    <div className="rounded-md border border-white/10 bg-[#141414] px-4 py-3 transition-colors duration-200 hover:border-white/20 hover:bg-[#181818]">
+  const content = (
+    <>
       <div className="flex items-center justify-between gap-3">
         <span className="text-sm text-white/80">{label}</span>
-
-        {status === "pass" ? (
-          <CheckCircle2 className="h-4 w-4 shrink-0 text-green-400" />
-        ) : (
-          <AlertCircle className="h-4 w-4 shrink-0 text-yellow-400" />
-        )}
+        <div className="flex items-center gap-2">
+          {status === "pass" ? (
+            <CheckCircle2 className="h-4 w-4 shrink-0 text-green-400" />
+          ) : (
+            <AlertCircle className="h-4 w-4 shrink-0 text-yellow-400" />
+          )}
+          {fieldKey && (
+            <ChevronRight className="h-3.5 w-3.5 shrink-0 text-white/25 transition-transform group-hover:translate-x-0.5" />
+          )}
+        </div>
       </div>
 
       <div className="mt-1.5 flex items-center justify-between gap-3">
@@ -771,14 +778,24 @@ function FieldRow({
       </div>
 
       {legalBasis && (
-        <p className="mt-1 truncate text-[10px] text-white/25">
-          {legalBasis}
-        </p>
+        <p className="mt-1 truncate text-[10px] text-white/25">{legalBasis}</p>
       )}
-    </div>
+    </>
   );
-}
 
+  const className =
+    "group block rounded-md border border-white/10 bg-[#141414] px-4 py-3 transition-colors duration-200 hover:border-white/20 hover:bg-[#181818]";
+
+  if (fieldKey) {
+    return (
+      <Link href={`/rules/${fieldKey}`} className={className}>
+        {content}
+      </Link>
+    );
+  }
+
+  return <div className={className}>{content}</div>;
+}
 /* ─────────────────────────────────────────────
    RAW TEXT BLOCK
 ───────────────────────────────────────────── */

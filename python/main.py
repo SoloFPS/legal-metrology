@@ -12,8 +12,45 @@ from typing import Any, Dict, List, Optional, Set
 from PIL import Image, ImageFilter, ImageOps
 from paddleocr import PaddleOCR
 
+# Set OCR_DEBUG=1 in the environment to print what each OCR pass (main
+# image + hi-res full-frame fallback + rotated passes, if enabled)
+# actually extracted. Useful for telling apart "OCR missed this line"
+# from "this line just isn't in the photo".
+OCR_DEBUG = os.environ.get("OCR_DEBUG", "0") == "1"
+
+# Some labels carry a secondary strip of dense text (price/date/batch)
+# printed sideways along a seam or fold. Detection can usually find a
+# rotated box for this, but recognition on a mis-oriented crop frequently
+# comes out scrambled (digits read backwards). Re-running OCR on the whole
+# image rotated +/-90 lets the recognizer read that text upright, like
+# everything else. This roughly doubles OCR latency per image, so it can
+# be turned off (e.g. on CPU-only deployments where that cost isn't
+# acceptable) with OCR_ROTATION_PASSES=1.
+#
+# Off by default: on a normal, mostly-horizontal label, rotating the whole
+# frame 90 degrees turns previously-clean text sideways, and the
+# recognizer trying to read it in the wrong orientation can produce
+# mirrored/scrambled garbage (e.g. "Do not swallow." coming back as
+# something like "moesu .ne ais eduoas") that pollutes the OCR output with
+# nothing to reliably filter it back out. Only turn this on for label
+# types you know carry a genuinely sideways-printed strip (e.g. a price/
+# date column printed down a pouch seam).
+OCR_ROTATION_PASSES = os.environ.get("OCR_ROTATION_PASSES", "0") == "1"
+
 ocr_engine = PaddleOCR(
-    lang="en", use_textline_orientation=True, device="cpu", enable_mkldnn=False
+    lang="en",
+    text_detection_model_name="PP-OCRv5_mobile_det",
+    text_recognition_model_name="PP-OCRv5_mobile_rec",
+    use_doc_orientation_classify=False,
+    use_doc_unwarping=False,
+    use_textline_orientation=True,
+    text_det_thresh=0.2,        # default ~0.3 — lower = more sensitive detection
+    text_det_box_thresh=0.4,    # default ~0.6 — lower = keeps fainter/smaller boxes
+    text_det_unclip_ratio=2.0,  # default ~1.5 — expands boxes, helps tightly-packed small text
+    text_rec_score_thresh=0.0,  # don't drop low-confidence recognized lines
+    device="cpu",
+    enable_mkldnn=True,
+    cpu_threads=6,
 )
 
 
@@ -43,7 +80,11 @@ MANDATORY_FIELDS = [
     ("date_of_manufacture", "Date of Manufacture / Packaging", "universal"),
     ("date_of_expiry", "Expiry / Use By / Best Before Date", "food_only"),
     ("manufacturer", "Manufacturer / Packer / Importer Name & Address", "universal"),
-    ("consumer_care", "Consumer Care Contact (Name, Address, Phone/Email)", "universal"),
+    (
+        "consumer_care",
+        "Consumer Care Contact (Name, Address, Phone/Email)",
+        "universal",
+    ),
     ("fssai_license", "14-Digit FSSAI License Number", "food_only"),
 ]
 FIELD_SCOPE = {key: scope for key, _, scope in MANDATORY_FIELDS}
@@ -122,6 +163,26 @@ NON_FOOD_KEYWORDS = [
     "DETERGENT",
     "SOAP",
     "SHAMPOO",
+    "TOOTHPASTE",
+    "TOOTH PASTE",
+    "TOOTH POWDER",
+    "MOUTHWASH",
+    "MOUTH WASH",
+    "HAIR OIL",
+    "HAIR GEL",
+    "SHAVING CREAM",
+    "AFTER SHAVE",
+    "DEODORANT",
+    "TALCUM POWDER",
+    "FACE WASH",
+    "FACE CREAM",
+    "BODY LOTION",
+    "MOISTURIZER",
+    "SUNSCREEN",
+    "HAND WASH",
+    "SANITIZER",
+    "CONDITIONER",
+    "COSMETIC",
 ]
 COMMODITY_NAME_KEYWORDS = FOOD_KEYWORDS + NON_FOOD_KEYWORDS
 
@@ -133,7 +194,12 @@ MRP_REGEX = re.compile(
     r"(?:MRP|MAXIMUM\s*RETAIL\s*PRICE|PRICE)\s*(?:INCL\.?\s*OF\s*ALL\s*TAXES)?\s*[:\s]*[₹RS\.?]*\s*(\d+(?:\.\d{1,2})?)",
     re.IGNORECASE,
 )
-FALLBACK_PRICE_REGEX = re.compile(r"(?:₹|RS\.?\s*)(\d+(?:\.\d{1,2})?)", re.IGNORECASE)
+# RPR / R.P.R / P₹ are common OCR misreads of the ₹ rupee symbol (it often
+# gets split into look-alike Latin letters), so they're included alongside
+# the real ₹/RS prefixes.
+FALLBACK_PRICE_REGEX = re.compile(
+    r"(?:₹|RS\.?\s*|RPR\s*|P\s*₹\s*)(\d+(?:\.\d{1,2})?)", re.IGNORECASE
+)
 
 NET_QTY_REGEX = re.compile(
     r"(?:NET\s*(?:WEIGHT|WT|QTY|QUANTITY|CONTENT|VOL|VOLUME)?\s*[:\s]*)?"
@@ -153,7 +219,9 @@ DATE_TOKEN_REGEX = re.compile(
     re.IGNORECASE,
 )
 SHELF_LIFE_REGEX = re.compile(
-    r"\d+\s*MONTHS?\s*(?:FROM|OF)?\s*(?:PACKAGING|MFG|MANUFACTURE)?", re.IGNORECASE
+    r"\d+\s*(?:DAYS?|WEEKS?|MONTHS?|YEARS?)\s*(?:FROM|OF)?\s*"
+    r"(?:PACKAGING|PACKING|MFG|MFD|PKD|MANUFACTURE)?\s*(?:DATE)?",
+    re.IGNORECASE,
 )
 
 MFG_CONTEXT_WORDS = [
@@ -183,7 +251,9 @@ FSSAI_REGEX = re.compile(r"\b\d{14}\b")
 # and/or email, not just the word "consumer care" on its own with no
 # actual contact detail.
 PHONE_REGEX = re.compile(
-    r"\b(?:\+?91[\s\-]?)?[6-9]\d{9}\b|\b1800[\s\-]?\d{3}[\s\-]?\d{4}\b"
+    r"\b(?:\+?\s?91[\s\-]?)?[6-9]\d{9}\b"  # 10-digit mobile
+    r"|\b1800[\s\-]?\d{3}[\s\-]?\d{4}\b"  # toll-free
+    r"|\b(?:\+?\s?91[\s\-]?)?0?\d{2,4}[\s\-]\d{6,8}\b",  # STD-code landline, e.g. 022-25782103
 )
 EMAIL_REGEX = re.compile(r"\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b")
 
@@ -203,19 +273,51 @@ SECONDARY_LOCATION_REGEX = re.compile(
 )
 FIELD_HINT_KEYWORDS = {
     "mrp": ["MRP", "MAXIMUM RETAIL PRICE", "MAX RETAIL PRICE", "PRICE"],
-    "net_quantity": ["NET QTY", "NET QUANTITY", "NET WT", "NET WEIGHT", "NET CONTENT", "NET VOL"],
+    "net_quantity": [
+        "NET QTY",
+        "NET QUANTITY",
+        "NET WT",
+        "NET WEIGHT",
+        "NET CONTENT",
+        "NET VOL",
+    ],
     "date_of_manufacture": ["MFG", "MFD", "PKD", "PACKED", "MANUFACTURE"],
     "date_of_expiry": ["EXP", "EXPIRY", "USE BY", "BEST BEFORE"],
     "batch_lot_code": ["BATCH", "LOT", "CODE"],
 }
 
 
+def normalize_ocr_numerics(text: str) -> str:
+    """Fix common OCR digit/letter confusions (e.g. '9O' -> '90') inside
+    otherwise-numeric tokens. Only touches tokens containing a real digit,
+    so words like 'SOAP' or 'Oil' are left alone."""
+    def _fix(m: "re.Match") -> str:
+        tok = m.group(0)
+        if not re.search(r"\d", tok):
+            return tok
+        return tok.replace("O", "0").replace("o", "0").replace("I", "1").replace("l", "1")
+    return re.sub(r"\b[\dOolI][\dOolI.\-]*\b", _fix, text)
+
+
+def _normalize_for_phrase_match(text_upper: str) -> str:
+    """Strip periods and collapse whitespace before matching against a
+    phrase list. Real labels punctuate standard phrases inconsistently
+    ("Mfd. by", "Mfd by", "MFD. BY."), and a literal substring check
+    against one exact form silently misses the others."""
+    return re.sub(r"\s+", " ", text_upper.replace(".", " ")).strip()
+
+
 def preprocess_image(
-    input_path: str, output_path: str, target_long_side: int = 2000
+    input_path: str, output_path: str, target_long_side: int = 1600
 ) -> str:
     img = Image.open(input_path).convert("RGB")
     long_side = max(img.size)
     if long_side < target_long_side:
+        scale = target_long_side / long_side
+        img = img.resize(
+            (int(img.width * scale), int(img.height * scale)), Image.LANCZOS
+        )
+    if long_side > target_long_side:
         scale = target_long_side / long_side
         img = img.resize(
             (int(img.width * scale), int(img.height * scale)), Image.LANCZOS
@@ -239,7 +341,9 @@ def detect_product_category(commodity_name: Optional[str], full_blob: str) -> st
     name_upper = (commodity_name or "").upper()
     blob_upper = full_blob.upper()
 
-    if name_upper and any(k == name_upper.upper() or k in name_upper for k in NON_FOOD_KEYWORDS):
+    if name_upper and any(
+        k == name_upper.upper() or k in name_upper for k in NON_FOOD_KEYWORDS
+    ):
         return CATEGORY_NON_FOOD
     if name_upper and any(k in name_upper for k in FOOD_KEYWORDS):
         return CATEGORY_FOOD
@@ -291,6 +395,7 @@ def detect_secondary_references(raw_texts: List[str]) -> List[Dict[str, str]]:
 
 
 def parse_packaging_data(raw_texts: List[str]) -> Dict[str, Any]:
+    raw_texts = [normalize_ocr_numerics(t) for t in raw_texts]
     full_blob = " ".join(raw_texts)
     # Every mandatory field always appears in the output. If nothing is
     # detected for a field, it stays None -> serializes as JSON null,
@@ -381,6 +486,11 @@ def parse_packaging_data(raw_texts: List[str]) -> Dict[str, Any]:
     # (e.g. only "COCA-COLA"/"PARLE") would silently miss every other brand,
     # so we rely on the phrase patterns instead and only use brand names as
     # a last-resort hint.
+    # Matched against a punctuation-stripped copy of each OCR line (see
+    # _normalize_for_phrase_match below), so phrases are written without
+    # periods here — real labels punctuate this inconsistently ("Mfd. by",
+    # "Mfd by", "MFD. BY"), and a literal "MFD BY" substring check missed
+    # every punctuated variant.
     manufacturer_phrases = [
         "MFD BY",
         "MFG BY",
@@ -393,8 +503,7 @@ def parse_packaging_data(raw_texts: List[str]) -> Dict[str, Any]:
         "PRODUCED BY",
         "PRODUCT OF",
         "PVT LTD",
-        "PVT. LTD",
-        "LTD.",
+        "LTD",
         "INDUSTRIES",
         "FOODS PVT",
         "BEVERAGES",
@@ -416,19 +525,28 @@ def parse_packaging_data(raw_texts: List[str]) -> Dict[str, Any]:
         "COMPLAINT",
     ]
     consumer_care_header_only = None
+    consumer_care_candidates = []  # (has_care_keyword, text)
     for text in raw_texts:
         text_upper = text.upper()
-        if any(m in text_upper for m in manufacturer_phrases):
+        text_norm = _normalize_for_phrase_match(text_upper)
+        if any(m in text_norm for m in manufacturer_phrases):
             if standard_fields.get("manufacturer") is None:
                 standard_fields["manufacturer"] = text
-        if PHONE_REGEX.search(text) or EMAIL_REGEX.search(text):
-            if standard_fields.get("consumer_care") is None:
-                standard_fields["consumer_care"] = text
-        elif any(c in text_upper for c in consumer_care_header_phrases):
-            if consumer_care_header_only is None:
-                consumer_care_header_only = text
 
-    if standard_fields.get("consumer_care") is None and consumer_care_header_only:
+        has_contact = bool(PHONE_REGEX.search(text) or EMAIL_REGEX.search(text))
+        has_care_keyword = any(c in text_norm for c in consumer_care_header_phrases)
+
+        if has_contact:
+            consumer_care_candidates.append((has_care_keyword, text))
+        elif has_care_keyword and consumer_care_header_only is None:
+            consumer_care_header_only = text
+
+    if consumer_care_candidates:
+        # Prefer a line that explicitly says "care"/"customer"/etc. over a
+        # generic manufacturer Tel/Email line, if both are present.
+        consumer_care_candidates.sort(key=lambda c: not c[0])
+        standard_fields["consumer_care"] = consumer_care_candidates[0][1]
+    elif consumer_care_header_only:
         standard_fields["consumer_care"] = consumer_care_header_only
 
     # 8. "See neck / cap / bottom / ..." references. For any field that is
@@ -476,8 +594,26 @@ def validate_compliance(fields: Dict[str, Any], category: str) -> Dict[str, Any]
             "actually apply if this isn't a food/beverage product."
         )
 
+    # A field can be missing for two very different reasons: it genuinely
+    # isn't printed on the pack (a real violation), or OCR just failed to
+    # read it (blur, small print, an awkward angle). We can't tell those
+    # apart automatically, so rather than silently reporting a possible
+    # false violation, flag it so a human double-checks the source photo
+    # before treating this as non-compliant. This does NOT change
+    # is_compliant/missing_mandatory_fields — it's advisory only.
+    if missing_fields:
+        warnings.append(
+            "One or more mandatory fields were not detected in the OCR text: "
+            + ", ".join(missing_fields)
+            + ". Before treating this as non-compliant, confirm they're actually "
+            "absent from the label rather than mis-read — a sharper, well-lit, "
+            "closer photo (especially of small print near the manufacturer / "
+            "consumer-care block) often resolves this."
+        )
+
     needs_secondary_image = any(
-        isinstance(fields.get(field_key), str) and fields[field_key].upper().startswith("SEE ")
+        isinstance(fields.get(field_key), str)
+        and fields[field_key].upper().startswith("SEE ")
         for field_key, _display_name, _scope in required_fields
     )
 
@@ -486,7 +622,9 @@ def validate_compliance(fields: Dict[str, Any], category: str) -> Dict[str, Any]
 
     return {
         "product_category": category,
-        "fields_checked": [display_name for _key, display_name, _scope in required_fields],
+        "fields_checked": [
+            display_name for _key, display_name, _scope in required_fields
+        ],
         "is_compliant": len(missing_fields) == 0 and not needs_secondary_image,
         "compliance_score": f"{compliance_percentage:.0f}%",
         "missing_mandatory_fields": missing_fields,
@@ -513,20 +651,26 @@ def merge_extracted_fields(
     merged = dict(primary)
     for field_key, _display_name, _scope in MANDATORY_FIELDS:
         primary_val = primary.get(field_key)
-        is_placeholder = isinstance(primary_val, str) and primary_val.upper().startswith("SEE ")
+        is_placeholder = isinstance(
+            primary_val, str
+        ) and primary_val.upper().startswith("SEE ")
         if primary_val is None or is_placeholder:
             secondary_val = secondary.get(field_key)
             if secondary_val and not (
-                isinstance(secondary_val, str) and secondary_val.upper().startswith("SEE ")
+                isinstance(secondary_val, str)
+                and secondary_val.upper().startswith("SEE ")
             ):
                 merged[field_key] = secondary_val
 
-    merged["_unclassified_dates_for_review"] = list(
-        set(
-            (primary.get("_unclassified_dates_for_review") or [])
-            + (secondary.get("_unclassified_dates_for_review") or [])
+    merged["_unclassified_dates_for_review"] = (
+        list(
+            set(
+                (primary.get("_unclassified_dates_for_review") or [])
+                + (secondary.get("_unclassified_dates_for_review") or [])
+            )
         )
-    ) or None
+        or None
+    )
     merged["_secondary_reference_hints"] = primary.get("_secondary_reference_hints", [])
     return merged
 
@@ -588,39 +732,114 @@ def _extract_raw_texts(ocr_results: Any) -> List[str]:
     return raw_texts
 
 
+def _run_ocr_pass(image_path: str) -> List[str]:
+    """Run the OCR engine on an already-preprocessed image file."""
+    ocr_results = ocr_engine.predict(image_path) if hasattr(ocr_engine, "predict") \
+        else ocr_engine.ocr(image_path, cls=False)
+    return _extract_raw_texts(ocr_results)
+
+
+def _dedupe_raw_texts(raw_texts: List[str]) -> List[str]:
+    """Drop near-duplicate lines that come from running multiple OCR
+    passes (main + bottom-crop + rotated) over overlapping regions of the
+    same image. A line is dropped if its normalized (letters/digits only)
+    form exactly matches, or is fully contained in, a line already kept —
+    this catches both exact repeats and a shorter/noisier read of text
+    another pass already captured cleanly."""
+    def _norm(s: str) -> str:
+        return re.sub(r"[^A-Z0-9]", "", s.upper())
+
+    kept: List[str] = []
+    kept_norm: List[str] = []
+    for text in raw_texts:
+        norm = _norm(text)
+        if not norm:
+            continue
+        if any(
+            norm == k or (len(norm) > 3 and (norm in k or k in norm))
+            for k in kept_norm
+        ):
+            continue
+        kept.append(text)
+        kept_norm.append(norm)
+    return kept
+
+
 def run_ocr(image_path: str) -> List[str]:
-    """Preprocess + OCR a single image file and return raw text lines."""
+    """Preprocess + OCR an image, then run additional passes to catch text
+    the main pass tends to miss or misread: a second pass over the WHOLE
+    frame at a higher upscale target (for small print, wherever it happens
+    to sit — bottom of a portrait label, middle of a landscape close-up,
+    etc. — rather than assuming a fixed region), and — if
+    OCR_ROTATION_PASSES is enabled — the whole image rotated +/-90 degrees
+    (for text printed sideways along a seam or fold). Results from every
+    pass are merged and de-duplicated."""
     if not os.path.exists(image_path):
         raise FileNotFoundError(f"Image file not found: {image_path}")
 
     with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp_file:
         prepped_path = tmp_file.name
+    hires_prepped_path = None
 
     try:
         preprocess_image(image_path, prepped_path)
+        raw_texts = _run_ocr_pass(prepped_path)
+        if OCR_DEBUG:
+            print(f"DEBUG main-pass raw texts ({len(raw_texts)}): {raw_texts}")
 
-        # FIX: the installed PaddleOCR version has no .predict() method at all,
-        # so calling it raises AttributeError, not TypeError. The old
-        # `except TypeError` clause never caught that, so the error propagated
-        # up uncaught. Check for the method up front instead of relying on
-        # exception-based control flow.
-        if hasattr(ocr_engine, "predict"):
-            ocr_results = ocr_engine.predict(prepped_path)
-        else:
-            ocr_results = ocr_engine.ocr(prepped_path, cls=False)
+        # Small/dense print (a manufacturer paragraph, a legal-basis block)
+        # can be too small to survive the target_long_side=1600 resize
+        # above no matter where in the frame it sits. Re-OCR the full,
+        # un-cropped frame at a higher upscale target and merge in anything
+        # new — this doesn't assume the small text is in any particular
+        # region, unlike a fixed crop would.
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as f:
+            hires_prepped_path = f.name
+        preprocess_image(image_path, hires_prepped_path, target_long_side=2400)
 
-        raw_texts = _extract_raw_texts(ocr_results)
+        hires_texts = _run_ocr_pass(hires_prepped_path)
+        if OCR_DEBUG:
+            print(f"DEBUG hi-res pass raw texts ({len(hires_texts)}): {hires_texts}")
 
-        # Debug aid: if raw_texts is empty, print the raw shape so you can see
-        # what your installed version actually returns.
+        raw_texts.extend(hires_texts)
+
+        # Rotated passes: catches text printed sideways along a seam/fold
+        # (e.g. a vertical price/date strip) that the main + bottom-crop
+        # passes read upright and therefore garble. See OCR_ROTATION_PASSES
+        # above for the latency trade-off.
+        if OCR_ROTATION_PASSES:
+            img_full = Image.open(image_path).convert("RGB")
+            for angle, label in ((90, "cw"), (-90, "ccw")):
+                rotated = img_full.rotate(angle, expand=True)
+                rot_path = rot_prepped_path = None
+                try:
+                    with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as f:
+                        rot_path = f.name
+                    rotated.save(rot_path, quality=95)
+
+                    with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as f:
+                        rot_prepped_path = f.name
+                    preprocess_image(rot_path, rot_prepped_path)
+
+                    rot_texts = _run_ocr_pass(rot_prepped_path)
+                    if OCR_DEBUG:
+                        print(f"DEBUG {label}-rotated raw texts ({len(rot_texts)}): {rot_texts}")
+                    raw_texts.extend(rot_texts)
+                finally:
+                    for p in (rot_path, rot_prepped_path):
+                        if p and os.path.exists(p):
+                            os.remove(p)
+
+        raw_texts = _dedupe_raw_texts(raw_texts)
+
         if not raw_texts:
-            print("DEBUG: no text extracted. Raw OCR result was:")
-            print(ocr_results)
+            print("DEBUG: no text extracted from any pass.")
 
         return raw_texts
     finally:
-        if os.path.exists(prepped_path):
-            os.remove(prepped_path)
+        for p in (prepped_path, hires_prepped_path):
+            if p and os.path.exists(p):
+                os.remove(p)
 
 
 def extract_package_data(image_path: str) -> Dict[str, Any]:
@@ -736,7 +955,9 @@ async def analyze(file: UploadFile = File(...)):
 
     try:
         data = extract_package_data(temp_path)
-        compliance_report = validate_compliance(data["standard_fields"], data["category"])
+        compliance_report = validate_compliance(
+            data["standard_fields"], data["category"]
+        )
 
         response: Dict[str, Any] = {
             "status": "complete",
@@ -761,9 +982,11 @@ async def analyze(file: UploadFile = File(...)):
                 "Some fields are only printed on another part of the package. "
                 "Please upload a photo of: "
                 + "; ".join(
-                    f"{h['field_hint']} (see {h['location'].lower()})"
-                    if h["field_hint"] != "unspecified"
-                    else f"see {h['location'].lower()}"
+                    (
+                        f"{h['field_hint']} (see {h['location'].lower()})"
+                        if h["field_hint"] != "unspecified"
+                        else f"see {h['location'].lower()}"
+                    )
                     for h in compliance_report["secondary_image_hints"]
                 )
                 + ". Then call /analyze/secondary with this session_id and that image."
@@ -776,9 +999,7 @@ async def analyze(file: UploadFile = File(...)):
 
 
 @app.post("/analyze/secondary")
-async def analyze_secondary(
-    session_id: str = Form(...), file: UploadFile = File(...)
-):
+async def analyze_secondary(session_id: str = Form(...), file: UploadFile = File(...)):
     _cleanup_stale_sessions()
     session = PENDING_SESSIONS.get(session_id)
     if session is None:
