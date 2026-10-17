@@ -60,6 +60,7 @@ type ComplianceReport = {
   product_category: string;
   fields_checked: string[];
   is_compliant: boolean;
+  compliance_status?: string;
   compliance_score: string;
   missing_mandatory_fields: string[];
   needs_secondary_image: boolean;
@@ -68,8 +69,14 @@ type ComplianceReport = {
   legal_basis: Record<string, string>;
 };
 
+type OCRSegment = {
+  text: string;
+  confidence?: number | null;
+};
+
 type AnalysisResult = {
   status: "complete" | "needs_secondary_image";
+  compliance_status?: string;
   session_id?: string;
   message?: string;
   extracted_data: {
@@ -77,6 +84,10 @@ type AnalysisResult = {
     raw_text_detected?: string[];
     raw_text_detected_primary?: string[];
     raw_text_detected_secondary?: string[];
+    ocr_segments?: OCRSegment[];
+    ocr_segments_primary?: OCRSegment[];
+    ocr_segments_secondary?: OCRSegment[];
+    ocr_confidence?: number | null;
   };
   compliance_report: ComplianceReport;
 };
@@ -94,6 +105,53 @@ function formatValue(value: unknown): { text: string; isPlaceholder: boolean } {
   }
   const str = String(value);
   return { text: str, isPlaceholder: str.toUpperCase().startsWith("SEE ") };
+}
+
+function getComplianceEvaluation(
+  result: AnalysisResult | null,
+  report: ComplianceReport | undefined,
+  needsSecondary: boolean
+): { isCompliant: boolean; statusText: string } {
+  if (needsSecondary || result?.status === "needs_secondary_image" || report?.needs_secondary_image) {
+    return { isCompliant: false, statusText: "Pending — 2nd image needed" };
+  }
+
+  if (!report) {
+    return { isCompliant: false, statusText: "Non-Compliant" };
+  }
+
+  // 1. Explicit backend compliance_status check (preserving backend status, case-insensitive)
+  const explicitStatus = result?.compliance_status || report.compliance_status;
+  if (typeof explicitStatus === "string") {
+    const normalized = explicitStatus.trim().toUpperCase();
+    if (normalized === "COMPLIANT") {
+      return { isCompliant: true, statusText: "Compliant" };
+    }
+    if (normalized === "NON_COMPLIANT" || normalized === "NON-COMPLIANT") {
+      return { isCompliant: false, statusText: "Non-Compliant" };
+    }
+    if (normalized === "PENDING_SECONDARY") {
+      return { isCompliant: false, statusText: "Pending — 2nd image needed" };
+    }
+  }
+
+  // 2. Direct boolean is_compliant from backend compliance report
+  if (report.is_compliant === true) {
+    return { isCompliant: true, statusText: "Compliant" };
+  }
+
+  // 3. Score-derived & check-derived compliance:
+  // A compliance score of 100% or 0 missing mandatory fields is treated as compliant.
+  // Note: OCR confidence is an optical metric and has no bearing on regulatory compliance.
+  const scoreNum = parseFloat(String(report.compliance_score || "").replace("%", "").trim());
+  const has100Score = !isNaN(scoreNum) && scoreNum >= 100;
+  const noMissingFields = Array.isArray(report.missing_mandatory_fields) && report.missing_mandatory_fields.length === 0;
+
+  if ((has100Score || noMissingFields) && !report.needs_secondary_image) {
+    return { isCompliant: true, statusText: "Compliant" };
+  }
+
+  return { isCompliant: false, statusText: "Non-Compliant" };
 }
 
 export default function Home() {
@@ -393,10 +451,15 @@ export default function Home() {
       const companyName = standardFields.manufacturer || undefined;
       const productCategory = rep?.product_category || undefined;
 
+      const { isCompliant: isInspectionCompliant } = getComplianceEvaluation(
+        analysisResult,
+        rep,
+        needsSecondary,
+      );
       const complianceStatus =
-        analysisResult.status === "needs_secondary_image"
+        analysisResult.status === "needs_secondary_image" || needsSecondary
           ? "PENDING_SECONDARY"
-          : rep?.is_compliant
+          : isInspectionCompliant
             ? "COMPLIANT"
             : "NON_COMPLIANT";
 
@@ -477,6 +540,11 @@ export default function Home() {
 
   const report = analysisResult?.compliance_report;
   const fields = analysisResult?.extracted_data.standard_fields ?? {};
+  const { isCompliant, statusText } = getComplianceEvaluation(
+    analysisResult,
+    report,
+    needsSecondary,
+  );
 
   return (
     <main className="min-h-screen bg-[#0d0d0d] text-white">
@@ -735,22 +803,22 @@ export default function Home() {
                       Scan the packaged commodity directly using your device camera or upload an existing photo from disk.
                     </p>
 
-                    <div className="mt-6 flex flex-col sm:flex-row items-center gap-3 w-full max-w-xs">
+                    <div className="mt-6 grid grid-cols-1 sm:grid-cols-2 gap-3 w-full max-w-sm">
                       <Button
                         onClick={startCamera}
-                        className="w-full h-10 gap-2 bg-white text-black hover:bg-white/90 active:bg-white/80 font-medium text-xs cursor-pointer shadow-sm transition-all"
+                        className="w-full min-w-0 h-10 gap-2 bg-white text-black hover:bg-white/90 active:bg-white/80 font-medium text-xs cursor-pointer shadow-sm transition-all"
                       >
-                        <Camera className="h-4 w-4" />
-                        Scan Product
+                        <Camera className="h-4 w-4 shrink-0" />
+                        <span className="truncate">Scan Product</span>
                       </Button>
 
                       <Button
                         variant="outline"
                         onClick={() => inputRef.current?.click()}
-                        className="w-full h-10 gap-2 border-white/15 bg-white/5 text-white hover:bg-white/10 hover:border-white/25 text-xs cursor-pointer transition-all"
+                        className="w-full min-w-0 h-10 gap-2 border-white/15 bg-white/5 text-white hover:bg-white/10 hover:border-white/25 text-xs cursor-pointer transition-all"
                       >
-                        <Upload className="h-4 w-4" />
-                        Upload Image
+                        <Upload className="h-4 w-4 shrink-0" />
+                        <span className="truncate">Upload Image</span>
                       </Button>
                     </div>
 
@@ -938,7 +1006,7 @@ export default function Home() {
                     className={`rounded-lg border p-5 transition-colors duration-300 ${
                       needsSecondary
                         ? "border-amber-500/20 bg-amber-500/5"
-                        : report?.is_compliant
+                        : isCompliant
                           ? "border-green-500/20 bg-green-500/5 hover:border-green-500/30"
                           : "border-red-500/20 bg-red-500/5 hover:border-red-500/30"
                     }`}
@@ -948,14 +1016,14 @@ export default function Home() {
                         className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-full ${
                           needsSecondary
                             ? "bg-amber-500/10"
-                            : report?.is_compliant
+                            : isCompliant
                               ? "bg-green-500/10"
                               : "bg-red-500/10"
                         }`}
                       >
                         {needsSecondary ? (
                           <ImagePlus className="h-6 w-6 text-amber-400" />
-                        ) : report?.is_compliant ? (
+                        ) : isCompliant ? (
                           <CheckCircle2 className="h-6 w-6 text-green-400" />
                         ) : (
                           <XCircle className="h-6 w-6 text-red-400" />
@@ -971,16 +1039,12 @@ export default function Home() {
                           className={`mt-1 text-xl font-semibold ${
                             needsSecondary
                               ? "text-amber-400"
-                              : report?.is_compliant
+                              : isCompliant
                                 ? "text-green-400"
                                 : "text-red-400"
                           }`}
                         >
-                          {needsSecondary
-                            ? "Pending — 2nd image needed"
-                            : report?.is_compliant
-                              ? "Compliant"
-                              : "Non-Compliant"}
+                          {statusText}
                         </p>
 
                         {report && (
@@ -988,7 +1052,7 @@ export default function Home() {
                             <div className="h-1.5 w-28 overflow-hidden rounded-full bg-white/10">
                               <div
                                 className={`h-full rounded-full ${
-                                  report.is_compliant
+                                  isCompliant
                                     ? "bg-green-400"
                                     : "bg-red-400"
                                 }`}
@@ -1016,6 +1080,75 @@ export default function Home() {
                       </span>
                     </div>
                   )}
+
+                  {/* OCR Recognition Confidence Indicator */}
+                  {analysisResult.extracted_data.ocr_confidence !== undefined &&
+                    analysisResult.extracted_data.ocr_confidence !== null && (
+                      <div className="mt-4 rounded-lg border border-white/10 bg-[#141414] p-4">
+                        <div className="flex items-start justify-between gap-4">
+                          <div>
+                            <div className="flex items-center gap-2">
+                              <span className="text-xs font-semibold uppercase tracking-wider text-white/70">
+                                OCR Confidence
+                              </span>
+                              <span
+                                className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium border ${
+                                  analysisResult.extracted_data.ocr_confidence >= 0.9
+                                    ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
+                                    : analysisResult.extracted_data.ocr_confidence >= 0.75
+                                      ? "border-amber-500/30 bg-amber-500/10 text-amber-300"
+                                      : "border-red-500/30 bg-red-500/10 text-red-300"
+                                }`}
+                              >
+                                {analysisResult.extracted_data.ocr_confidence >= 0.9
+                                  ? "High (>= 90%)"
+                                  : analysisResult.extracted_data.ocr_confidence >= 0.75
+                                    ? "Moderate (75-89%)"
+                                    : "Low (< 75%)"}
+                              </span>
+                            </div>
+                            <p className="mt-1 text-[11px] text-white/50 leading-relaxed">
+                              Mean optical recognition confidence across detected text segments.
+                            </p>
+                          </div>
+                          <div className="text-right shrink-0">
+                            <div className="font-mono text-2xl font-bold tracking-tight text-white">
+                              {Math.round(analysisResult.extracted_data.ocr_confidence * 100)}%
+                            </div>
+                            <span className="text-[10px] text-white/40 block">
+                              Recognition confidence
+                            </span>
+                          </div>
+                        </div>
+
+                        {/* Progress bar */}
+                        <div className="mt-3 h-1.5 w-full overflow-hidden rounded-full bg-white/10">
+                          <div
+                            className={`h-full rounded-full transition-all duration-500 ${
+                              analysisResult.extracted_data.ocr_confidence >= 0.9
+                                ? "bg-emerald-400"
+                                : analysisResult.extracted_data.ocr_confidence >= 0.75
+                                  ? "bg-amber-400"
+                                  : "bg-red-400"
+                            }`}
+                            style={{
+                              width: `${Math.min(
+                                100,
+                                Math.max(
+                                  0,
+                                  Math.round(analysisResult.extracted_data.ocr_confidence * 100)
+                                )
+                              )}%`,
+                            }}
+                          />
+                        </div>
+
+                        <div className="mt-2.5 flex items-center justify-between text-[10px] text-white/35">
+                          <span>UI guidance threshold: High &ge;90% &bull; Moderate &ge;75% &bull; Low &lt;75%</span>
+                          <span className="italic">Does not imply statutory compliance</span>
+                        </div>
+                      </div>
+                    )}
 
                   {/* Inspection Record Action & Status Banner */}
                   <div className="mt-4 rounded-lg border border-white/10 bg-[#141414] p-4 transition-all">
@@ -1159,7 +1292,7 @@ export default function Home() {
                     <p className="mt-3 text-sm leading-6 text-white/65">
                       {needsSecondary
                         ? "One or more declarations could only be found by referring to another part of the package. Upload the secondary image on the left to complete the check."
-                        : report?.is_compliant
+                        : isCompliant
                           ? "All mandatory declarations for this product category were identified in the uploaded document(s)."
                           : `Some mandatory declarations were not identified. ${report?.missing_mandatory_fields.length} field(s) require further verification.`}
                     </p>
@@ -1195,6 +1328,11 @@ export default function Home() {
                               analysisResult.extracted_data.raw_text_detected ??
                               []
                             }
+                            segments={
+                              analysisResult.extracted_data
+                                .ocr_segments_primary ??
+                              analysisResult.extracted_data.ocr_segments
+                            }
                           />
                           {analysisResult.extracted_data
                             .raw_text_detected_secondary && (
@@ -1203,6 +1341,10 @@ export default function Home() {
                               lines={
                                 analysisResult.extracted_data
                                   .raw_text_detected_secondary
+                              }
+                              segments={
+                                analysisResult.extracted_data
+                                  .ocr_segments_secondary
                               }
                             />
                           )}
@@ -1300,20 +1442,90 @@ function FieldRow({
    RAW TEXT BLOCK
 ───────────────────────────────────────────── */
 
-function RawTextBlock({ title, lines }: { title: string; lines: string[] }) {
+function RawTextBlock({
+  title,
+  lines,
+  segments,
+}: {
+  title: string;
+  lines: string[];
+  segments?: OCRSegment[];
+}) {
+  const [viewMode, setViewMode] = useState<"detailed" | "compact">("detailed");
+
+  const hasConfidence =
+    segments &&
+    segments.some(
+      (s) => s.confidence !== undefined && s.confidence !== null
+    );
+
   return (
     <div className="rounded-md border border-white/10 bg-[#101010] p-3">
-      <p className="mb-2 text-[10px] font-medium uppercase tracking-wider text-white/35">
-        {title}
-      </p>
+      <div className="mb-2.5 flex items-center justify-between">
+        <p className="text-[10px] font-medium uppercase tracking-wider text-white/40">
+          {title} {segments ? `(${segments.length} segments)` : `(${lines.length} lines)`}
+        </p>
+        {hasConfidence && (
+          <button
+            type="button"
+            onClick={() =>
+              setViewMode((m) => (m === "detailed" ? "compact" : "detailed"))
+            }
+            className="text-[10px] text-white/50 hover:text-white/80 transition-colors underline underline-offset-2 cursor-pointer"
+          >
+            {viewMode === "detailed"
+              ? "Switch to compact view"
+              : "Show recognition confidence"}
+          </button>
+        )}
+      </div>
+
       {lines.length === 0 ? (
         <p className="text-xs text-white/30">No text detected.</p>
+      ) : viewMode === "detailed" && segments && segments.length > 0 ? (
+        <div className="space-y-1.5 max-h-80 overflow-y-auto pr-1">
+          {segments.map((seg, i) => {
+            const confPercent =
+              seg.confidence !== null && seg.confidence !== undefined
+                ? Math.round(seg.confidence * 100)
+                : null;
+
+            return (
+              <div
+                key={i}
+                className="flex items-center justify-between gap-3 rounded border border-white/5 bg-white/[0.02] px-3 py-1.5 text-xs transition-colors hover:border-white/15 hover:bg-white/[0.04]"
+              >
+                <span className="font-mono text-white/75 break-all select-text">
+                  {seg.text}
+                </span>
+                {confPercent !== null ? (
+                  <span
+                    className={`shrink-0 rounded px-1.5 py-0.5 font-mono text-[10px] font-semibold border ${
+                      confPercent >= 90
+                        ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-400"
+                        : confPercent >= 75
+                          ? "border-amber-500/30 bg-amber-500/10 text-amber-400"
+                          : "border-red-500/30 bg-red-500/10 text-red-400"
+                    }`}
+                    title={`PaddleOCR recognition score: ${seg.confidence}`}
+                  >
+                    {confPercent}%
+                  </span>
+                ) : (
+                  <span className="shrink-0 font-mono text-[10px] text-white/30">
+                    N/A
+                  </span>
+                )}
+              </div>
+            );
+          })}
+        </div>
       ) : (
         <div className="flex flex-wrap gap-1.5">
           {lines.map((line, i) => (
             <span
               key={i}
-              className="rounded bg-white/5 px-2 py-1 text-[11px] text-white/55"
+              className="rounded bg-white/5 px-2 py-1 text-[11px] font-mono text-white/55"
             >
               {line}
             </span>

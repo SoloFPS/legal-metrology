@@ -653,13 +653,20 @@ def validate_compliance(fields: Dict[str, Any], category: str) -> Dict[str, Any]
 
     denom = len(required_fields) if required_fields else 1
     compliance_percentage = ((denom - len(missing_fields)) / denom) * 100
+    is_compliant = len(missing_fields) == 0 and not needs_secondary_image
+    compliance_status = (
+        "PENDING_SECONDARY"
+        if needs_secondary_image
+        else ("COMPLIANT" if is_compliant else "NON_COMPLIANT")
+    )
 
     return {
         "product_category": category,
         "fields_checked": [
             display_name for _key, display_name, _scope in required_fields
         ],
-        "is_compliant": len(missing_fields) == 0 and not needs_secondary_image,
+        "is_compliant": is_compliant,
+        "compliance_status": compliance_status,
         "compliance_score": f"{compliance_percentage:.0f}%",
         "missing_mandatory_fields": missing_fields,
         "needs_secondary_image": needs_secondary_image,
@@ -709,23 +716,38 @@ def merge_extracted_fields(
     return merged
 
 
-def _extract_raw_texts(ocr_results: Any) -> List[str]:
-    raw_texts: List[str] = []
+def _extract_ocr_segments(ocr_results: Any) -> List[Dict[str, Any]]:
+    """Extract recognized text segments along with their optical character recognition
+    (OCR) confidence scores from PaddleOCR / PaddleX results.
+    Preserves actual model confidence values without fabrication."""
+    segments: List[Dict[str, Any]] = []
 
     if not ocr_results:
-        return raw_texts
+        return segments
 
-    # Case 1: Root object is a dictionary
-    if isinstance(ocr_results, dict):
-        for key in ("rec_texts", "text_lines", "texts"):
-            value = ocr_results.get(key)
-            if isinstance(value, list):
-                for item in value:
-                    text = str(item).strip()
-                    if text:
-                        raw_texts.append(text)
-        if raw_texts:
-            return raw_texts
+    # Case 1: Root object is a dictionary or dict-like object (e.g. paddlex OCRResult)
+    if hasattr(ocr_results, "get") or isinstance(ocr_results, dict):
+        rec_texts = (
+            ocr_results.get("rec_texts")
+            or ocr_results.get("text_lines")
+            or ocr_results.get("texts")
+            or []
+        )
+        rec_scores = (
+            ocr_results.get("rec_scores")
+            or ocr_results.get("scores")
+            or []
+        )
+        if isinstance(rec_texts, list):
+            for i, item in enumerate(rec_texts):
+                text = str(item).strip()
+                if text:
+                    conf = None
+                    if i < len(rec_scores) and isinstance(rec_scores[i], (int, float)):
+                        conf = round(float(rec_scores[i]), 4)
+                    segments.append({"text": text, "confidence": conf})
+        if segments:
+            return segments
 
     # Case 2: Root object is a list (Standard PaddleOCR or Multi-page output)
     if isinstance(ocr_results, list):
@@ -733,15 +755,27 @@ def _extract_raw_texts(ocr_results: Any) -> List[str]:
             if not page:
                 continue
 
-            # Case 2a: Page is a dictionary
-            if isinstance(page, dict):
-                for key in ("rec_texts", "text_lines", "texts"):
-                    value = page.get(key)
-                    if isinstance(value, list):
-                        for item in value:
-                            text = str(item).strip()
-                            if text:
-                                raw_texts.append(text)
+            # Case 2a: Page is a dictionary or dict-like (paddlex OCRResult)
+            if hasattr(page, "get") or isinstance(page, dict):
+                rec_texts = (
+                    page.get("rec_texts")
+                    or page.get("text_lines")
+                    or page.get("texts")
+                    or []
+                )
+                rec_scores = (
+                    page.get("rec_scores")
+                    or page.get("scores")
+                    or []
+                )
+                if isinstance(rec_texts, list):
+                    for i, item in enumerate(rec_texts):
+                        text = str(item).strip()
+                        if text:
+                            conf = None
+                            if i < len(rec_scores) and isinstance(rec_scores[i], (int, float)):
+                                conf = round(float(rec_scores[i]), 4)
+                            segments.append({"text": text, "confidence": conf})
                 continue
 
             # Case 2b: Standard nested PaddleOCR structures [[coord, (text, score)], ...]
@@ -751,63 +785,122 @@ def _extract_raw_texts(ocr_results: Any) -> List[str]:
                         continue
 
                     item = line[1]
+                    text = ""
+                    conf = None
 
                     # Direct check for tuple/list ("Text String", confidence_score)
                     if isinstance(item, (list, tuple)) and item:
                         text = str(item[0]).strip()
+                        if len(item) > 1 and isinstance(item[1], (int, float)):
+                            conf = round(float(item[1]), 4)
                     elif isinstance(item, str):
                         text = item.strip()
                     else:
                         continue
 
                     if text:
-                        raw_texts.append(text)
+                        segments.append({"text": text, "confidence": conf})
 
-    return raw_texts
-
-
-def _run_ocr_pass(image_path: str) -> List[str]:
-    """Run the OCR engine on an already-preprocessed image file."""
-    ocr_results = ocr_engine.predict(image_path) if hasattr(ocr_engine, "predict") \
-        else ocr_engine.ocr(image_path, cls=False)
-    return _extract_raw_texts(ocr_results)
+    return segments
 
 
-def _dedupe_raw_texts(raw_texts: List[str]) -> List[str]:
-    """Drop near-duplicate lines that come from running multiple OCR
-    passes (main + bottom-crop + rotated) over overlapping regions of the
-    same image. A line is dropped if its normalized (letters/digits only)
-    form exactly matches, or is fully contained in, a line already kept —
-    this catches both exact repeats and a shorter/noisier read of text
-    another pass already captured cleanly."""
+def _extract_raw_texts(ocr_results: Any) -> List[str]:
+    """Backward-compatible helper that returns a plain list of recognized text strings."""
+    segments = _extract_ocr_segments(ocr_results)
+    return [s["text"] for s in segments]
+
+
+def calculate_aggregate_ocr_confidence(
+    segments: List[Dict[str, Any]],
+) -> Optional[float]:
+    """Calculate aggregate OCR Recognition Confidence as the transparent arithmetic mean
+    across all recognized text segments that carry a valid model confidence score.
+    Returns None if no segments carry valid confidence values.
+
+    IMPORTANT: This metric represents the OCR model's optical recognition certainty,
+    NOT Legal Metrology statutory compliance."""
+    scores = [
+        s["confidence"]
+        for s in segments
+        if s.get("confidence") is not None and isinstance(s["confidence"], (int, float))
+    ]
+    if not scores:
+        return None
+    return round(sum(scores) / len(scores), 4)
+
+
+def _dedupe_ocr_segments(segments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Drop near-duplicate segments across multiple OCR passes. If the same normalized
+    line is captured by multiple passes, preserve the one with higher recognition confidence."""
     def _norm(s: str) -> str:
         return re.sub(r"[^A-Z0-9]", "", s.upper())
 
-    kept: List[str] = []
+    kept: List[Dict[str, Any]] = []
     kept_norm: List[str] = []
-    for text in raw_texts:
+
+    for seg in segments:
+        text = seg.get("text", "")
         norm = _norm(text)
         if not norm:
             continue
-        if any(
-            norm == k or (len(norm) > 3 and (norm in k or k in norm))
-            for k in kept_norm
-        ):
+
+        match_idx = -1
+        for idx, k in enumerate(kept_norm):
+            if norm == k or (len(norm) > 3 and (norm in k or k in norm)):
+                match_idx = idx
+                break
+
+        if match_idx >= 0:
+            old_conf = kept[match_idx].get("confidence")
+            new_conf = seg.get("confidence")
+            if new_conf is not None and (old_conf is None or new_conf > old_conf):
+                kept[match_idx] = seg
             continue
-        kept.append(text)
+
+        kept.append(seg)
         kept_norm.append(norm)
+
     return kept
 
 
-def run_ocr(image_path: str) -> List[str]:
-    """Preprocess + OCR an image, then run additional passes to catch text
-    the main pass tends to miss or misread: a second pass over the WHOLE
-    frame at a higher upscale target (for small print, wherever it happens
-    to sit — bottom of a portrait label, middle of a landscape close-up,
-    etc. — rather than assuming a fixed region), and — if
-    OCR_ROTATION_PASSES is enabled — the whole image rotated +/-90 degrees
-    (for text printed sideways along a seam or fold). Results from every
-    pass are merged and de-duplicated."""
+def _dedupe_raw_texts(raw_texts: List[str]) -> List[str]:
+    """Backward-compatible deduplication for lists of strings."""
+    segments = [{"text": t, "confidence": None} for t in raw_texts]
+    deduped = _dedupe_ocr_segments(segments)
+    return [s["text"] for s in deduped]
+
+
+def _run_ocr_pass(image_path: str) -> List[Dict[str, Any]]:
+    """Run the OCR engine on an already-preprocessed image file and extract
+    recognized segments with recognition confidence values."""
+    ocr_results = (
+        ocr_engine.predict(image_path)
+        if hasattr(ocr_engine, "predict")
+        else ocr_engine.ocr(image_path, cls=False)
+    )
+    return _extract_ocr_segments(ocr_results)
+
+
+class OCRRunResult(list):
+    """List of raw texts for complete backward compatibility with callers expecting
+    List[str], with attached recognition segments and aggregate recognition confidence."""
+
+    def __init__(
+        self,
+        raw_texts: List[str],
+        ocr_segments: List[Dict[str, Any]],
+        ocr_confidence: Optional[float],
+    ):
+        super().__init__(raw_texts)
+        self.raw_texts = raw_texts
+        self.ocr_segments = ocr_segments
+        self.ocr_confidence = ocr_confidence
+
+
+def run_ocr(image_path: str) -> OCRRunResult:
+    """Preprocess + OCR an image, running additional passes to catch small/dense
+    or rotated text. Results from every pass are merged, de-duplicated by keeping
+    the highest-confidence read, and returned with segments and aggregate confidence."""
     if not os.path.exists(image_path):
         raise FileNotFoundError(f"Image file not found: {image_path}")
 
@@ -817,30 +910,22 @@ def run_ocr(image_path: str) -> List[str]:
 
     try:
         preprocess_image(image_path, prepped_path)
-        raw_texts = _run_ocr_pass(prepped_path)
+        segments = _run_ocr_pass(prepped_path)
         if OCR_DEBUG:
-            print(f"DEBUG main-pass raw texts ({len(raw_texts)}): {raw_texts}")
+            print(f"DEBUG main-pass raw texts ({len(segments)}): {[s['text'] for s in segments]}")
 
-        # Small/dense print (a manufacturer paragraph, a legal-basis block)
-        # can be too small to survive the target_long_side=1600 resize
-        # above no matter where in the frame it sits. Re-OCR the full,
-        # un-cropped frame at a higher upscale target and merge in anything
-        # new — this doesn't assume the small text is in any particular
-        # region, unlike a fixed crop would.
+        # Small/dense print pass
         with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as f:
             hires_prepped_path = f.name
         preprocess_image(image_path, hires_prepped_path, target_long_side=2400)
 
-        hires_texts = _run_ocr_pass(hires_prepped_path)
+        hires_segments = _run_ocr_pass(hires_prepped_path)
         if OCR_DEBUG:
-            print(f"DEBUG hi-res pass raw texts ({len(hires_texts)}): {hires_texts}")
+            print(f"DEBUG hi-res pass raw texts ({len(hires_segments)}): {[s['text'] for s in hires_segments]}")
 
-        raw_texts.extend(hires_texts)
+        segments.extend(hires_segments)
 
-        # Rotated passes: catches text printed sideways along a seam/fold
-        # (e.g. a vertical price/date strip) that the main + bottom-crop
-        # passes read upright and therefore garble. See OCR_ROTATION_PASSES
-        # above for the latency trade-off.
+        # Rotated passes
         if OCR_ROTATION_PASSES:
             img_full = Image.open(image_path).convert("RGB")
             for angle, label in ((90, "cw"), (-90, "ccw")):
@@ -855,21 +940,25 @@ def run_ocr(image_path: str) -> List[str]:
                         rot_prepped_path = f.name
                     preprocess_image(rot_path, rot_prepped_path)
 
-                    rot_texts = _run_ocr_pass(rot_prepped_path)
+                    rot_segments = _run_ocr_pass(rot_prepped_path)
                     if OCR_DEBUG:
-                        print(f"DEBUG {label}-rotated raw texts ({len(rot_texts)}): {rot_texts}")
-                    raw_texts.extend(rot_texts)
+                        print(
+                            f"DEBUG {label}-rotated raw texts ({len(rot_segments)}): {[s['text'] for s in rot_segments]}"
+                        )
+                    segments.extend(rot_segments)
                 finally:
                     for p in (rot_path, rot_prepped_path):
                         if p and os.path.exists(p):
                             os.remove(p)
 
-        raw_texts = _dedupe_raw_texts(raw_texts)
+        deduped_segments = _dedupe_ocr_segments(segments)
+        raw_texts = [s["text"] for s in deduped_segments]
+        agg_confidence = calculate_aggregate_ocr_confidence(deduped_segments)
 
         if not raw_texts:
             print("DEBUG: no text extracted from any pass.")
 
-        return raw_texts
+        return OCRRunResult(raw_texts, deduped_segments, agg_confidence)
     finally:
         for p in (prepped_path, hires_prepped_path):
             if p and os.path.exists(p):
@@ -877,34 +966,37 @@ def run_ocr(image_path: str) -> List[str]:
 
 
 def extract_package_data(image_path: str) -> Dict[str, Any]:
-    """OCR one image and return its standard_fields + detected category,
-    without yet producing a compliance report (used so a second/follow-up
-    image's data can be merged in before compliance is judged)."""
-    raw_texts = run_ocr(image_path)
+    """OCR one image and return its standard_fields, raw_texts, ocr_segments,
+    ocr_confidence, and detected category."""
+    ocr_res = run_ocr(image_path)
+    raw_texts = ocr_res.raw_texts
+    ocr_segments = ocr_res.ocr_segments
+    ocr_confidence = ocr_res.ocr_confidence
+
     standard_fields = parse_packaging_data(raw_texts)
     full_blob = " ".join(raw_texts)
     category = detect_product_category(standard_fields.get("commodity_name"), full_blob)
     return {
         "standard_fields": standard_fields,
         "raw_texts": raw_texts,
+        "ocr_segments": ocr_segments,
+        "ocr_confidence": ocr_confidence,
         "category": category,
     }
 
 
 def analyze_package_image(image_path: str) -> Dict[str, Any]:
-    """Single-image entry point (kept for CLI / backward-compatible use).
-    If the label references a secondary print area (e.g. "MRP: See Neck"),
-    the returned compliance_report will have needs_secondary_image=True —
-    callers that can obtain a second image should extract data from it and
-    call merge_extracted_fields() + validate_compliance() instead of
-    treating this single-image result as final.
-    """
+    """Single-image entry point (kept for CLI / backward-compatible use)."""
     data = extract_package_data(image_path)
     compliance_report = validate_compliance(data["standard_fields"], data["category"])
     return {
+        "status": "needs_secondary_image" if compliance_report.get("needs_secondary_image") else "complete",
+        "compliance_status": compliance_report.get("compliance_status"),
         "extracted_data": {
             "standard_fields": data["standard_fields"],
             "raw_text_detected": data["raw_texts"],
+            "ocr_segments": data.get("ocr_segments", []),
+            "ocr_confidence": data.get("ocr_confidence"),
         },
         "compliance_report": compliance_report,
     }
@@ -1016,9 +1108,12 @@ async def analyze(file: UploadFile = File(...)):
 
         response: Dict[str, Any] = {
             "status": "complete",
+            "compliance_status": compliance_report.get("compliance_status"),
             "extracted_data": {
                 "standard_fields": data["standard_fields"],
                 "raw_text_detected": data["raw_texts"],
+                "ocr_segments": data.get("ocr_segments", []),
+                "ocr_confidence": data.get("ocr_confidence"),
             },
             "compliance_report": compliance_report,
         }
@@ -1029,6 +1124,8 @@ async def analyze(file: UploadFile = File(...)):
                 "created_at": time.time(),
                 "standard_fields": data["standard_fields"],
                 "raw_texts": data["raw_texts"],
+                "ocr_segments": data.get("ocr_segments", []),
+                "ocr_confidence": data.get("ocr_confidence"),
                 "category": data["category"],
             }
             response["status"] = "needs_secondary_image"
@@ -1083,12 +1180,22 @@ async def analyze_secondary(session_id: str = Form(...), file: UploadFile = File
 
         compliance_report = validate_compliance(merged_fields, category)
 
+        primary_segments = session.get("ocr_segments", [])
+        secondary_segments = secondary_data.get("ocr_segments", [])
+        combined_segments = primary_segments + secondary_segments
+        overall_confidence = calculate_aggregate_ocr_confidence(combined_segments)
+
         result = {
             "status": "complete",
+            "compliance_status": compliance_report.get("compliance_status"),
             "extracted_data": {
                 "standard_fields": merged_fields,
                 "raw_text_detected_primary": session["raw_texts"],
                 "raw_text_detected_secondary": secondary_data["raw_texts"],
+                "ocr_segments_primary": primary_segments,
+                "ocr_segments_secondary": secondary_segments,
+                "ocr_segments": combined_segments,
+                "ocr_confidence": overall_confidence,
             },
             "compliance_report": compliance_report,
         }
