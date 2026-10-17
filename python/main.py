@@ -695,13 +695,22 @@ def merge_extracted_fields(
         is_placeholder = isinstance(
             primary_val, str
         ) and primary_val.upper().startswith("SEE ")
-        if primary_val is None or is_placeholder:
+        if primary_val is None or not primary_val or is_placeholder:
             secondary_val = secondary.get(field_key)
             if secondary_val and not (
                 isinstance(secondary_val, str)
                 and secondary_val.upper().startswith("SEE ")
             ):
                 merged[field_key] = secondary_val
+
+        # If fssai_license is in both, combine without duplicates
+        if field_key == "fssai_license":
+            p_lic = primary_val if isinstance(primary_val, list) else ([primary_val] if primary_val else [])
+            s_val = secondary.get("fssai_license")
+            s_lic = s_val if isinstance(s_val, list) else ([s_val] if s_val else [])
+            combined_lic = list(dict.fromkeys(p_lic + s_lic))
+            if combined_lic:
+                merged["fssai_license"] = combined_lic
 
     merged["_unclassified_dates_for_review"] = (
         list(
@@ -712,7 +721,13 @@ def merge_extracted_fields(
         )
         or None
     )
-    merged["_secondary_reference_hints"] = primary.get("_secondary_reference_hints", [])
+    p_hints = primary.get("_secondary_reference_hints") or []
+    s_hints = secondary.get("_secondary_reference_hints") or []
+    merged_hints = list(p_hints)
+    for h in s_hints:
+        if h not in merged_hints:
+            merged_hints.append(h)
+    merged["_secondary_reference_hints"] = merged_hints
     return merged
 
 
@@ -1092,41 +1107,80 @@ def _cleanup_stale_sessions() -> None:
 
 
 @app.post("/analyze")
-async def analyze(file: UploadFile = File(...)):
+async def analyze(
+    file: Optional[UploadFile] = File(None),
+    files: Optional[List[UploadFile]] = File(None),
+):
     _cleanup_stale_sessions()
-    suffix = os.path.splitext(file.filename or "")[1]
 
-    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as temp_file:
-        shutil.copyfileobj(file.file, temp_file)
-        temp_path = temp_file.name
+    # Collect files from either 'files' (multi-image) or 'file' (single-image backward compatibility)
+    all_files: List[UploadFile] = []
+    if files:
+        all_files.extend(files)
+    elif file:
+        all_files.append(file)
 
-    try:
-        data = extract_package_data(temp_path)
-        compliance_report = validate_compliance(
-            data["standard_fields"], data["category"]
+    if not all_files:
+        raise HTTPException(
+            status_code=400,
+            detail="No image file provided for analysis. Please upload at least one image.",
         )
+
+    # Maximum 6 images allowed per inspection
+    all_files = all_files[:6]
+
+    temp_paths: List[str] = []
+    try:
+        for f in all_files:
+            suffix = os.path.splitext(f.filename or "")[1] or ".jpg"
+            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tf:
+                shutil.copyfileobj(f.file, tf)
+                temp_paths.append(tf.name)
+
+        # 1. Primary image analysis
+        primary_data = extract_package_data(temp_paths[0])
+        merged_fields = dict(primary_data["standard_fields"])
+        category = primary_data["category"]
+        raw_texts: List[str] = list(primary_data["raw_texts"])
+        ocr_segments: List[Dict[str, Any]] = list(primary_data.get("ocr_segments", []))
+
+        # 2. Sequential merge of additional images (images 2-6)
+        for p in temp_paths[1:]:
+            sec_data = extract_package_data(p)
+            merged_fields = merge_extracted_fields(merged_fields, sec_data["standard_fields"])
+            if category == CATEGORY_UNKNOWN:
+                category = sec_data["category"]
+            raw_texts.extend(sec_data["raw_texts"])
+            ocr_segments.extend(sec_data.get("ocr_segments", []))
+
+        deduped_texts = _dedupe_raw_texts(raw_texts)
+        deduped_segments = _dedupe_ocr_segments(ocr_segments)
+        overall_confidence = calculate_aggregate_ocr_confidence(deduped_segments)
+
+        compliance_report = validate_compliance(merged_fields, category)
 
         response: Dict[str, Any] = {
             "status": "complete",
             "compliance_status": compliance_report.get("compliance_status"),
             "extracted_data": {
-                "standard_fields": data["standard_fields"],
-                "raw_text_detected": data["raw_texts"],
-                "ocr_segments": data.get("ocr_segments", []),
-                "ocr_confidence": data.get("ocr_confidence"),
+                "standard_fields": merged_fields,
+                "raw_text_detected": deduped_texts,
+                "ocr_segments": deduped_segments,
+                "ocr_confidence": overall_confidence,
             },
             "compliance_report": compliance_report,
         }
 
-        if compliance_report["needs_secondary_image"]:
+        # For single image: if secondary image is needed, maintain backwards-compatible pending session
+        if len(all_files) == 1 and compliance_report.get("needs_secondary_image"):
             session_id = str(uuid.uuid4())
             PENDING_SESSIONS[session_id] = {
                 "created_at": time.time(),
-                "standard_fields": data["standard_fields"],
-                "raw_texts": data["raw_texts"],
-                "ocr_segments": data.get("ocr_segments", []),
-                "ocr_confidence": data.get("ocr_confidence"),
-                "category": data["category"],
+                "standard_fields": primary_data["standard_fields"],
+                "raw_texts": primary_data["raw_texts"],
+                "ocr_segments": primary_data.get("ocr_segments", []),
+                "ocr_confidence": primary_data.get("ocr_confidence"),
+                "category": primary_data["category"],
             }
             response["status"] = "needs_secondary_image"
             response["session_id"] = session_id
@@ -1139,15 +1193,19 @@ async def analyze(file: UploadFile = File(...)):
                         if h["field_hint"] != "unspecified"
                         else f"see {h['location'].lower()}"
                     )
-                    for h in compliance_report["secondary_image_hints"]
+                    for h in compliance_report.get("secondary_image_hints", [])
                 )
                 + ". Then call /analyze/secondary with this session_id and that image."
             )
 
         return response
     finally:
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
+        for p in temp_paths:
+            if os.path.exists(p):
+                try:
+                    os.remove(p)
+                except Exception:
+                    pass
 
 
 @app.post("/analyze/secondary")
