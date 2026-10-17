@@ -1,9 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { ChevronRight } from "lucide-react"; // add to your existing lucide-react import line
-
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Upload,
   FileImage,
@@ -18,7 +16,13 @@ import {
   MapPin,
   ChevronDown,
   ChevronUp,
+  ChevronRight,
   Tag,
+  BookmarkCheck,
+  ClipboardCheck,
+  Camera,
+  CameraOff,
+  RotateCcw,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -26,6 +30,10 @@ import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 
 const API_BASE = "http://127.0.0.1:8000";
+
+// Isolated default officer identity for the persistent inspection registry.
+// Can be replaced by real auth claims (JWT/session) in future phases.
+const DEFAULT_OFFICER_NAME = "Officer #1042";
 
 // Mirrors MANDATORY_FIELDS in the Python backend (display_name -> field key)
 // so extracted values can be looked up for whatever fields the backend
@@ -65,7 +73,7 @@ type AnalysisResult = {
   session_id?: string;
   message?: string;
   extracted_data: {
-    standard_fields: Record<string, any>;
+    standard_fields: Record<string, unknown>;
     raw_text_detected?: string[];
     raw_text_detected_primary?: string[];
     raw_text_detected_secondary?: string[];
@@ -77,7 +85,7 @@ function humanize(value: string) {
   return value.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
-function formatValue(value: any): { text: string; isPlaceholder: boolean } {
+function formatValue(value: unknown): { text: string; isPlaceholder: boolean } {
   if (value === null || value === undefined || value === "") {
     return { text: "Not detected", isPlaceholder: false };
   }
@@ -91,6 +99,9 @@ function formatValue(value: any): { text: string; isPlaceholder: boolean } {
 export default function Home() {
   const inputRef = useRef<HTMLInputElement>(null);
   const secondaryInputRef = useRef<HTMLInputElement>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const streamRef = useRef<MediaStream | null>(null);
 
   const [image, setImage] = useState<string | null>(null);
   const [fileName, setFileName] = useState("");
@@ -101,6 +112,11 @@ export default function Home() {
     null,
   );
 
+  // Camera Scanning State
+  const [isCameraActive, setIsCameraActive] = useState(false);
+  const [cameraError, setCameraError] = useState<string | null>(null);
+  const [isCapturedViaCamera, setIsCapturedViaCamera] = useState(false);
+
   const [secondaryImage, setSecondaryImage] = useState<string | null>(null);
   const [secondaryFileName, setSecondaryFileName] = useState("");
   const [secondaryFile, setSecondaryFile] = useState<File | null>(null);
@@ -108,12 +124,182 @@ export default function Home() {
 
   const [showRawText, setShowRawText] = useState(false);
 
+  // Inspection record saving state
+  const [savingInspection, setSavingInspection] = useState(false);
+  const [savedInspectionId, setSavedInspectionId] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
+
   const needsSecondary =
     analysisResult?.status === "needs_secondary_image" &&
     !!analysisResult.session_id;
 
+  // Camera Lifecycle: stop active MediaStream tracks to prevent hardware/resource leaks
+  const stopCameraStream = () => {
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => {
+        try {
+          track.stop();
+        } catch (e) {
+          console.warn("Error stopping camera track:", e);
+        }
+      });
+      streamRef.current = null;
+    }
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
+  };
+
+  // Clean up camera stream on unmount
+  useEffect(() => {
+    return () => {
+      stopCameraStream();
+    };
+  }, []);
+
+  const startCamera = async () => {
+    setCameraError(null);
+    setIsCameraActive(true);
+
+    if (
+      typeof window === "undefined" ||
+      !navigator?.mediaDevices?.getUserMedia
+    ) {
+      setCameraError(
+        "Camera access is not supported by your current browser. Please use Upload Image or try Chrome/Edge.",
+      );
+      return;
+    }
+
+    // Stop any existing stream before starting a new one
+    stopCameraStream();
+
+    try {
+      let stream: MediaStream;
+      try {
+        // Preferred environment/rear camera for packaged commodities
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: { ideal: "environment" },
+            width: { ideal: 1920 },
+            height: { ideal: 1080 },
+          },
+          audio: false,
+        });
+      } catch {
+        // Graceful fallback for webcams / desktop without facingMode constraints
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: true,
+          audio: false,
+        });
+      }
+
+      streamRef.current = stream;
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        try {
+          await videoRef.current.play();
+        } catch (err) {
+          console.warn("Video play interrupted:", err);
+        }
+      }
+    } catch (err: unknown) {
+      console.error("Camera access error:", err);
+      let msg =
+        "Unable to access camera. Please check camera permissions or use Upload Image instead.";
+      if (err instanceof DOMException) {
+        if (
+          err.name === "NotAllowedError" ||
+          err.name === "PermissionDeniedError"
+        ) {
+          msg =
+            "Camera access was denied. Please allow camera access in your browser settings or use Upload Image instead.";
+        } else if (
+          err.name === "NotFoundError" ||
+          err.name === "DevicesNotFoundError"
+        ) {
+          msg =
+            "No camera device was found on this system. Please connect a camera or use Upload Image instead.";
+        } else if (
+          err.name === "NotReadableError" ||
+          err.name === "TrackStartError"
+        ) {
+          msg =
+            "The camera is currently in use by another application or could not be accessed.";
+        }
+      }
+      setCameraError(msg);
+      stopCameraStream();
+    }
+  };
+
+  const cancelCamera = () => {
+    stopCameraStream();
+    setIsCameraActive(false);
+    setCameraError(null);
+  };
+
+  const captureFrame = () => {
+    if (!videoRef.current || !canvasRef.current) return;
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+
+    const width = video.videoWidth || 1280;
+    const height = video.videoHeight || 720;
+    canvas.width = width;
+    canvas.height = height;
+
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.drawImage(video, 0, 0, width, height);
+
+    canvas.toBlob(
+      (blob) => {
+        if (!blob) return;
+        const now = new Date();
+        const pad = (n: number) => String(n).padStart(2, "0");
+        const timeStr = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(
+          now.getDate(),
+        )}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+        const name = `scan_${timeStr}.jpg`;
+
+        const capturedFile = new File([blob], name, { type: "image/jpeg" });
+
+        // Immediately stop camera stream to release hardware
+        stopCameraStream();
+        setIsCameraActive(false);
+        setCameraError(null);
+
+        // Feed existing analysis state
+        setFile(capturedFile);
+        setFileName(name);
+        setImage(URL.createObjectURL(blob));
+        setIsCapturedViaCamera(true);
+        setAnalyzed(false);
+        setAnalysisResult(null);
+        setSecondaryImage(null);
+        setSecondaryFile(null);
+        setSecondaryFileName("");
+        setShowRawText(false);
+        setSavedInspectionId(null);
+        setSaveError(null);
+      },
+      "image/jpeg",
+      0.95,
+    );
+  };
+
+  const retake = () => {
+    removeImage();
+    startCamera();
+  };
+
   const handleFile = (f: File) => {
     if (!f.type.startsWith("image/")) return;
+    stopCameraStream();
+    setIsCameraActive(false);
+    setCameraError(null);
+    setIsCapturedViaCamera(false);
     setFile(f);
     setFileName(f.name);
     setImage(URL.createObjectURL(f));
@@ -123,6 +309,8 @@ export default function Home() {
     setSecondaryFile(null);
     setSecondaryFileName("");
     setShowRawText(false);
+    setSavedInspectionId(null);
+    setSaveError(null);
   };
 
   const handleSecondaryFile = (f: File) => {
@@ -135,6 +323,8 @@ export default function Home() {
   const handleAnalyze = async () => {
     if (!file) return;
     setAnalyzing(true);
+    setSavedInspectionId(null);
+    setSaveError(null);
 
     try {
       const formData = new FormData();
@@ -160,6 +350,8 @@ export default function Home() {
   const handleAnalyzeSecondary = async () => {
     if (!secondaryFile || !analysisResult?.session_id) return;
     setSecondaryAnalyzing(true);
+    setSavedInspectionId(null);
+    setSaveError(null);
 
     try {
       const formData = new FormData();
@@ -183,7 +375,90 @@ export default function Home() {
     }
   };
 
+  const handleSaveInspection = async () => {
+    if (!analysisResult || savingInspection || savedInspectionId) return;
+
+    setSavingInspection(true);
+    setSaveError(null);
+
+    try {
+      const standardFields =
+        (analysisResult.extracted_data?.standard_fields as Record<
+          string,
+          string
+        >) || {};
+      const rep = analysisResult.compliance_report;
+
+      const productName = standardFields.commodity_name || undefined;
+      const companyName = standardFields.manufacturer || undefined;
+      const productCategory = rep?.product_category || undefined;
+
+      const complianceStatus =
+        analysisResult.status === "needs_secondary_image"
+          ? "PENDING_SECONDARY"
+          : rep?.is_compliant
+            ? "COMPLIANT"
+            : "NON_COMPLIANT";
+
+      const complianceScore = rep?.compliance_score || undefined;
+      const violations = rep?.missing_mandatory_fields || [];
+
+      const payload = {
+        session_id: analysisResult.session_id || undefined,
+        officer_name: DEFAULT_OFFICER_NAME,
+        company_name: companyName,
+        product_name: productName,
+        product_category: productCategory,
+        latitude: null,
+        longitude: null,
+        compliance_status: complianceStatus,
+        compliance_score: complianceScore,
+        extracted_data: analysisResult.extracted_data,
+        compliance_report: rep,
+        violations: violations,
+        image_reference: fileName || undefined,
+      };
+
+      const response = await fetch(`${API_BASE}/inspections`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(payload),
+      });
+
+      if (response.status === 409) {
+        const errData = await response.json().catch(() => ({}));
+        setSaveError(
+          errData.detail || "This inspection record has already been saved.",
+        );
+        return;
+      }
+
+      if (!response.ok) {
+        const errData = await response.json().catch(() => ({}));
+        throw new Error(
+          errData.detail || `Failed to save inspection (${response.status})`,
+        );
+      }
+
+      const saved = await response.json();
+      setSavedInspectionId(saved.inspection_id || saved.id);
+    } catch (err: unknown) {
+      console.error("Save inspection error:", err);
+      const msg =
+        err instanceof Error ? err.message : "Failed to save inspection record.";
+      setSaveError(msg);
+    } finally {
+      setSavingInspection(false);
+    }
+  };
+
   const removeImage = () => {
+    stopCameraStream();
+    setIsCameraActive(false);
+    setCameraError(null);
+    setIsCapturedViaCamera(false);
     setImage(null);
     setFileName("");
     setFile(null);
@@ -193,6 +468,8 @@ export default function Home() {
     setSecondaryFile(null);
     setSecondaryFileName("");
     setShowRawText(false);
+    setSavedInspectionId(null);
+    setSaveError(null);
 
     if (inputRef.current) inputRef.current.value = "";
     if (secondaryInputRef.current) secondaryInputRef.current.value = "";
@@ -257,14 +534,26 @@ export default function Home() {
                   <span className="text-sm font-medium text-white/90">
                     Primary Image
                   </span>
+                  {isCapturedViaCamera && image && (
+                    <span className="ml-1 rounded-full border border-sky-500/30 bg-sky-500/10 px-2 py-0.5 text-[10px] font-medium text-sky-400">
+                      Camera Scan
+                    </span>
+                  )}
+                  {isCameraActive && (
+                    <span className="ml-1 flex items-center gap-1.5 rounded-full border border-red-500/30 bg-red-500/10 px-2 py-0.5 text-[10px] font-medium text-red-400">
+                      <span className="h-1.5 w-1.5 rounded-full bg-red-400 animate-pulse" />
+                      Live Viewfinder
+                    </span>
+                  )}
                 </div>
 
-                {image && (
+                {(image || isCameraActive) && (
                   <Button
                     variant="ghost"
                     size="icon"
-                    onClick={removeImage}
-                    className="h-7 w-7 text-white/50 transition-colors hover:bg-white/10 hover:text-white"
+                    onClick={isCameraActive ? cancelCamera : removeImage}
+                    className="h-7 w-7 text-white/50 transition-colors hover:bg-white/10 hover:text-white cursor-pointer"
+                    title={isCameraActive ? "Cancel camera" : "Remove image"}
                   >
                     <X className="h-4 w-4" />
                   </Button>
@@ -272,57 +561,207 @@ export default function Home() {
               </div>
 
               <div className="p-5">
-                <div
-                  className="group relative flex min-h-[380px] cursor-pointer items-center justify-center overflow-hidden rounded-lg border border-dashed border-white/20 bg-[#101010] transition-all duration-300 hover:border-white/35 hover:bg-[#121212]"
-                  onClick={() => !image && inputRef.current?.click()}
-                >
-                  {image ? (
-                    <>
+                {/* Hidden canvas used for high-res frame capture */}
+                <canvas ref={canvasRef} className="hidden" />
+
+                {/* 1. Live Camera Viewfinder Mode */}
+                {isCameraActive ? (
+                  <div className="space-y-4">
+                    <div className="relative flex min-h-[380px] w-full flex-col items-center justify-center overflow-hidden rounded-lg border border-white/20 bg-black">
+                      <video
+                        ref={videoRef}
+                        autoPlay
+                        playsInline
+                        muted
+                        className="h-full max-h-[380px] w-full object-contain"
+                      />
+
+                      {/* Viewfinder Target Framing Overlay */}
+                      <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-between p-4">
+                        <div className="flex items-center gap-2 rounded-full border border-white/10 bg-black/60 px-3 py-1 text-[11px] font-medium text-white/85 backdrop-blur-sm">
+                          <span className="h-2 w-2 rounded-full bg-red-500 animate-pulse" />
+                          <span>Field Scanner Active</span>
+                        </div>
+
+                        {/* Center Framing Reticle */}
+                        <div className="relative h-44 w-64 max-w-[85%] rounded-lg border-2 border-dashed border-white/40">
+                          <div className="absolute -top-1 -left-1 h-3.5 w-3.5 border-t-2 border-l-2 border-white" />
+                          <div className="absolute -top-1 -right-1 h-3.5 w-3.5 border-t-2 border-r-2 border-white" />
+                          <div className="absolute -bottom-1 -left-1 h-3.5 w-3.5 border-b-2 border-l-2 border-white" />
+                          <div className="absolute -bottom-1 -right-1 h-3.5 w-3.5 border-b-2 border-r-2 border-white" />
+                        </div>
+
+                        <p className="rounded bg-black/60 px-2.5 py-1 text-[11px] text-white/70 backdrop-blur-sm">
+                          Align product declaration label within reticle
+                        </p>
+                      </div>
+
+                      {/* Viewfinder Bottom Controls */}
+                      <div className="absolute inset-x-0 bottom-0 flex items-center justify-between bg-gradient-to-t from-black/90 via-black/60 to-transparent p-4">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={cancelCamera}
+                          className="text-white/70 hover:text-white hover:bg-white/10 gap-1.5 cursor-pointer text-xs"
+                        >
+                          <X className="h-4 w-4" />
+                          Cancel
+                        </Button>
+
+                        <Button
+                          onClick={captureFrame}
+                          className="h-10 px-5 gap-2 rounded-full bg-white text-black hover:bg-white/90 active:scale-95 font-medium text-xs cursor-pointer shadow-lg transition-transform"
+                        >
+                          <Camera className="h-4 w-4" />
+                          Capture Photo
+                        </Button>
+
+                        <div className="w-16" />
+                      </div>
+                    </div>
+
+                    {cameraError && (
+                      <div className="rounded-lg border border-red-500/30 bg-red-500/10 p-3.5 text-xs text-red-200">
+                        <div className="flex items-start gap-2.5">
+                          <CameraOff className="h-4 w-4 shrink-0 text-red-400 mt-0.5" />
+                          <div className="flex-1">
+                            <p className="font-medium text-red-300">Camera Notice</p>
+                            <p className="mt-0.5 leading-5 text-red-200/80">{cameraError}</p>
+                            <div className="mt-2.5 flex items-center gap-2">
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={startCamera}
+                                className="h-7 text-xs border-red-500/40 text-red-200 hover:bg-red-500/20 cursor-pointer"
+                              >
+                                <RotateCcw className="h-3 w-3 mr-1" />
+                                Retry
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                onClick={cancelCamera}
+                                className="h-7 text-xs text-white/60 hover:text-white cursor-pointer"
+                              >
+                                Use Upload Instead
+                              </Button>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ) : image ? (
+                  /* 2. Captured or Uploaded Image Preview Mode */
+                  <div>
+                    <div className="group relative flex min-h-[380px] items-center justify-center overflow-hidden rounded-lg border border-dashed border-white/20 bg-[#101010]">
                       <img
                         src={image}
-                        alt="Uploaded document"
+                        alt="Product document"
                         className="h-full max-h-[380px] w-full object-contain"
                       />
                       <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/70 to-transparent px-4 pb-4 pt-10 opacity-0 transition-opacity duration-300 group-hover:opacity-100">
                         <p className="text-xs font-medium text-white/80">
-                          Uploaded document
+                          {isCapturedViaCamera ? "Captured via Camera Scanner" : "Uploaded document"}
                         </p>
                       </div>
-                    </>
-                  ) : (
-                    <div className="flex flex-col items-center text-center">
-                      <div className="mb-5 flex h-16 w-16 items-center justify-center rounded-xl border border-white/10 bg-white/5 transition-colors duration-300 group-hover:border-white/20 group-hover:bg-white/10">
-                        <Upload className="h-6 w-6 text-white/55 transition-transform duration-300 group-hover:-translate-y-0.5" />
+                    </div>
+
+                    {/* Action Bar for Captured / Uploaded Image */}
+                    <div className="mt-3 flex items-center justify-between gap-2 rounded-md border border-white/10 bg-[#141414] px-3.5 py-2">
+                      <div className="flex items-center gap-2 text-xs text-white/60 min-w-0">
+                        {isCapturedViaCamera ? (
+                          <Camera className="h-3.5 w-3.5 shrink-0 text-sky-400" />
+                        ) : (
+                          <FileImage className="h-3.5 w-3.5 shrink-0 text-white/50" />
+                        )}
+                        <span className="truncate">{fileName}</span>
                       </div>
 
-                      <p className="text-sm font-medium text-white/85">
-                        Select a package image
-                      </p>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        {isCapturedViaCamera && !analyzed && (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={retake}
+                            className="h-7 px-2.5 text-xs text-white/70 hover:text-white hover:bg-white/10 gap-1.5 cursor-pointer"
+                          >
+                            <RotateCcw className="h-3.5 w-3.5" />
+                            Retake
+                          </Button>
+                        )}
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={removeImage}
+                          className="h-7 px-2 text-xs text-white/40 hover:text-red-400 hover:bg-red-500/10 cursor-pointer"
+                          title="Remove image"
+                        >
+                          <X className="h-3.5 w-3.5" />
+                        </Button>
+                      </div>
+                    </div>
 
-                      <p className="mt-2 max-w-xs text-xs leading-5 text-white/55">
-                        Upload a clear image of the product packaging or
-                        declaration label.
-                      </p>
+                    {/* Analyze Action */}
+                    <Button
+                      className="mt-4 h-11 w-full bg-white text-black transition-all duration-200 hover:bg-white/90 active:bg-white/80 font-medium cursor-pointer"
+                      disabled={analyzing || needsSecondary}
+                      onClick={handleAnalyze}
+                    >
+                      {analyzing ? (
+                        <>
+                          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                          Analyzing document...
+                        </>
+                      ) : (
+                        <>
+                          <ScanSearch className="mr-2 h-4 w-4" />
+                          Analyze Document
+                        </>
+                      )}
+                    </Button>
+                  </div>
+                ) : (
+                  /* 3. Empty State: Dual Action - Scan Product or Upload Image */
+                  <div className="flex flex-col items-center justify-center min-h-[380px] rounded-lg border border-dashed border-white/20 bg-[#101010] p-6 text-center transition-all duration-300 hover:border-white/30 hover:bg-[#121212]">
+                    <div className="mb-5 flex h-16 w-16 items-center justify-center rounded-2xl border border-white/10 bg-white/5 transition-transform duration-300">
+                      <ScanSearch className="h-7 w-7 text-white/60" />
+                    </div>
+
+                    <p className="text-base font-semibold text-white/90">
+                      Add Product Image
+                    </p>
+                    <p className="mt-1.5 max-w-sm text-xs leading-5 text-white/50">
+                      Scan the packaged commodity directly using your device camera or upload an existing photo from disk.
+                    </p>
+
+                    <div className="mt-6 flex flex-col sm:flex-row items-center gap-3 w-full max-w-xs">
+                      <Button
+                        onClick={startCamera}
+                        className="w-full h-10 gap-2 bg-white text-black hover:bg-white/90 active:bg-white/80 font-medium text-xs cursor-pointer shadow-sm transition-all"
+                      >
+                        <Camera className="h-4 w-4" />
+                        Scan Product
+                      </Button>
 
                       <Button
                         variant="outline"
-                        className="mt-6 border-white/15 bg-white/5 text-white/85 transition-colors duration-200 hover:border-white/25 hover:bg-white/10 hover:text-white"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          inputRef.current?.click();
-                        }}
+                        onClick={() => inputRef.current?.click()}
+                        className="w-full h-10 gap-2 border-white/15 bg-white/5 text-white hover:bg-white/10 hover:border-white/25 text-xs cursor-pointer transition-all"
                       >
-                        <Upload className="mr-2 h-4 w-4" />
-                        Select Image
+                        <Upload className="h-4 w-4" />
+                        Upload Image
                       </Button>
                     </div>
-                  )}
-                </div>
 
-                {fileName && (
-                  <div className="mt-3 flex items-center gap-2 text-xs text-white/60">
-                    <FileImage className="h-3.5 w-3.5 text-white/50" />
-                    <span className="truncate">{fileName}</span>
+                    {cameraError && (
+                      <div className="mt-5 w-full max-w-xs rounded-md border border-red-500/30 bg-red-500/10 p-2.5 text-xs text-red-200">
+                        <div className="flex items-start gap-2">
+                          <CameraOff className="h-3.5 w-3.5 shrink-0 text-red-400 mt-0.5" />
+                          <span className="text-left text-[11px] leading-snug">{cameraError}</span>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 )}
 
@@ -336,24 +775,6 @@ export default function Home() {
                     if (f) handleFile(f);
                   }}
                 />
-
-                <Button
-                  className="mt-5 h-11 w-full bg-white text-black transition-all duration-200 hover:bg-white/90 active:bg-white/80"
-                  disabled={!image || analyzing || needsSecondary}
-                  onClick={handleAnalyze}
-                >
-                  {analyzing ? (
-                    <>
-                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                      Analyzing document...
-                    </>
-                  ) : (
-                    <>
-                      <ScanSearch className="mr-2 h-4 w-4" />
-                      Analyze Document
-                    </>
-                  )}
-                </Button>
               </div>
             </Card>
 
@@ -506,8 +927,8 @@ export default function Home() {
                     No document analyzed yet
                   </p>
                   <p className="mt-1 max-w-xs text-xs leading-5 text-white/45">
-                    Upload a package image on the left and click "Analyze
-                    Document" to see results here.
+                    Upload a package image on the left and click &quot;Analyze
+                    Document&quot; to see results here.
                   </p>
                 </div>
               ) : (
@@ -595,6 +1016,85 @@ export default function Home() {
                       </span>
                     </div>
                   )}
+
+                  {/* Inspection Record Action & Status Banner */}
+                  <div className="mt-4 rounded-lg border border-white/10 bg-[#141414] p-4 transition-all">
+                    <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                      <div className="flex items-center gap-3">
+                        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-white/10 bg-white/5">
+                          <ClipboardCheck className="h-4 w-4 text-white/70" />
+                        </div>
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs font-semibold uppercase tracking-wider text-white/70">
+                              Inspection Record
+                            </span>
+                            <span className="rounded bg-white/10 px-1.5 py-0.5 text-[10px] font-mono text-white/50">
+                              {DEFAULT_OFFICER_NAME}
+                            </span>
+                          </div>
+                          <p className="mt-0.5 text-[11px] text-white/45">
+                            {savedInspectionId
+                              ? "Saved to persistent compliance registry"
+                              : "Log this analysis into the persistent inspection records"}
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-2">
+                        {savedInspectionId ? (
+                          <div className="flex items-center gap-2 rounded-md border border-emerald-500/30 bg-emerald-500/10 px-3 py-1.5 text-xs text-emerald-300">
+                            <CheckCircle2 className="h-4 w-4 text-emerald-400" />
+                            <span className="font-medium">Record ID:</span>
+                            <code className="rounded bg-black/40 px-1.5 py-0.5 font-mono text-[11px] text-emerald-200">
+                              {savedInspectionId}
+                            </code>
+                          </div>
+                        ) : (
+                          <Button
+                            onClick={handleSaveInspection}
+                            disabled={savingInspection}
+                            className="h-9 gap-1.5 bg-white text-black hover:bg-white/90 active:bg-white/80 transition-all font-medium text-xs px-4 cursor-pointer"
+                          >
+                            {savingInspection ? (
+                              <>
+                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                Saving...
+                              </>
+                            ) : (
+                              <>
+                                <BookmarkCheck className="h-3.5 w-3.5" />
+                                Save Inspection
+                              </>
+                            )}
+                          </Button>
+                        )}
+                      </div>
+                    </div>
+
+                    {saveError && (
+                      <div className="mt-3 flex items-start gap-2 rounded-md border border-red-500/30 bg-red-500/10 p-2.5 text-xs text-red-300">
+                        <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-red-400" />
+                        <span className="leading-snug">{saveError}</span>
+                      </div>
+                    )}
+
+                    {savedInspectionId && (
+                      <div className="mt-3 flex items-center justify-between border-t border-white/5 pt-2 text-[11px] text-white/40">
+                        <span>Protected against accidental duplicate saves.</span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSavedInspectionId(null);
+                            setSaveError(null);
+                          }}
+                          className="text-white/60 hover:text-white transition-colors underline underline-offset-2 cursor-pointer"
+                        >
+                          Start New Inspection
+                        </button>
+                      </div>
+                    )}
+                  </div>
 
                   {/* Declaration Checks — dynamic, based on whatever the
                       backend actually checked for this category */}

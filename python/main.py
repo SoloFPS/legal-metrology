@@ -214,10 +214,27 @@ NET_QTY_REGEX = re.compile(
 # one field (as the old mfg_or_use_by_date did) can't tell a compliant
 # label (both dates present) from one missing the mfg date entirely.
 DATE_TOKEN_REGEX = re.compile(
-    r"(\d{1,2}[./\-]\d{1,2}[./\-]\d{2,4}"
+    r"(\d{1,2}[./\-*•·]\d{1,2}[./\-*•·]\d{2,4}"
     r"|(?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|SEPT|OCT|NOV|DEC)[A-Z]*\.?\s?\d{2,4})",
     re.IGNORECASE,
 )
+
+# Last-resort fallback for a badly OCR'd date where the separator
+# character itself got misread as a stray letter (e.g. a small printed
+# dot rendered as "D", as in "2D05"). Deliberately looser than
+# DATE_TOKEN_REGEX above -- matches two digit groups joined by ANY single
+# non-digit character, with no year group required. Only ever tried on a
+# line that already carries a date/expiry context word (see the loop
+# below), so it can't misfire on unrelated numeric text elsewhere.
+LOOSE_DATE_TOKEN_REGEX = re.compile(r"\d{1,2}\D\d{2,4}(?:\D\d{2,4})?")
+
+
+def _clean_loose_date(token: str) -> str:
+    """Best-effort cleanup so a loose match like '2D05.' displays as
+    '2-05' instead of showing the raw misread letter/punctuation."""
+    return re.sub(r"\D", "-", token).strip("-")
+
+
 SHELF_LIFE_REGEX = re.compile(
     r"\d+\s*(?:DAYS?|WEEKS?|MONTHS?|YEARS?)\s*(?:FROM|OF)?\s*"
     r"(?:PACKAGING|PACKING|MFG|MFD|PKD|MANUFACTURE)?\s*(?:DATE)?",
@@ -234,7 +251,10 @@ MFG_CONTEXT_WORDS = [
     "PACKAGING",
     "PACKING",
 ]
-EXP_CONTEXT_WORDS = ["EXP", "EXPIRY", "USE BY", "USE BEFORE", "BEST BEFORE", "BB DATE"]
+EXP_CONTEXT_WORDS = [
+    "EXP", "EXPIRY", "USE BY", "USE BEFORE", "BEST BEFORE", "BB DATE",
+    "BY", "BEFORE",
+]
 
 # FSSAI Reg 5(9): a batch/lot/code number in some recognizable form (Batch
 # No., B.No., Lot No., L.No., Code, LN, CN, BN) is mandatory on its own,
@@ -452,9 +472,23 @@ def parse_packaging_data(raw_texts: List[str]) -> Dict[str, Any]:
     for text in raw_texts:
         text_upper = text.upper()
         date_match = DATE_TOKEN_REGEX.search(text)
-        if not date_match:
+        date_val = None
+        if date_match:
+            date_val = date_match.group(1).strip()
+        else:
+            # Strict pattern found nothing -- try the loose fallback, but
+            # only on a line that already looks like a date/expiry line,
+            # so garbled numeric noise elsewhere can't get mistaken for one.
+            loose_match = LOOSE_DATE_TOKEN_REGEX.search(text)
+            if loose_match and (
+                any(w in text_upper for w in MFG_CONTEXT_WORDS)
+                or any(w in text_upper for w in EXP_CONTEXT_WORDS)
+            ):
+                date_val = _clean_loose_date(loose_match.group(0))
+
+        if not date_val:
             continue
-        date_val = date_match.group(1).strip()
+
         if any(w in text_upper for w in MFG_CONTEXT_WORDS):
             if mfg_date is None:
                 mfg_date = date_val
@@ -908,11 +942,32 @@ def _find_candidate_images(project_root: str) -> List[str]:
 #                                   with the first, and returns the final
 #                                   compliance report.
 # ==========================================
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Query, status
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
 import shutil
 
+try:
+    from database import (
+        init_db,
+        create_inspection,
+        get_inspections,
+        get_inspection_by_id,
+        DuplicateInspectionError,
+    )
+except ImportError:
+    from python.database import (
+        init_db,
+        create_inspection,
+        get_inspections,
+        get_inspection_by_id,
+        DuplicateInspectionError,
+    )
+
 app = FastAPI()
+
+# Initialize persistent SQLite DB for inspection records
+init_db()
 
 app.add_middleware(
     CORSMiddleware,
@@ -1047,3 +1102,176 @@ async def analyze_secondary(session_id: str = Form(...), file: UploadFile = File
     finally:
         if os.path.exists(temp_path):
             os.remove(temp_path)
+
+
+# ==========================================
+# INSPECTION RECORDS API
+# Persistent inspection record management for Legal Metrology officers.
+# ==========================================
+
+DEFAULT_OFFICER_NAME = os.environ.get("DEFAULT_OFFICER_NAME", "Officer #1042")
+
+
+def get_current_officer() -> str:
+    """Isolated officer identity retrieval. In a future iteration with
+    authentication, this can be swapped with JWT / session claims."""
+    return os.environ.get("DEFAULT_OFFICER_NAME", DEFAULT_OFFICER_NAME)
+
+
+class InspectionCreateRequest(BaseModel):
+    inspection_id: Optional[str] = None
+    session_id: Optional[str] = None
+    officer_name: Optional[str] = None
+    timestamp: Optional[str] = None
+    company_name: Optional[str] = None
+    product_name: Optional[str] = None
+    product_category: Optional[str] = None
+    latitude: Optional[float] = Field(default=None, ge=-90.0, le=90.0)
+    longitude: Optional[float] = Field(default=None, ge=-180.0, le=180.0)
+    compliance_status: Optional[str] = None
+    compliance_score: Optional[str] = None
+    extracted_data: Optional[Dict[str, Any]] = None
+    compliance_report: Optional[Dict[str, Any]] = None
+    violations: Optional[List[str]] = None
+    image_reference: Optional[str] = None
+
+
+@app.post("/inspections", status_code=201)
+async def create_inspection_record(req: InspectionCreateRequest):
+    """
+    Create a persistent inspection record from analysis results or manual input.
+    Maps existing extracted fields and compliance report into inspection records.
+    Prevents duplicate saves for the same session or inspection ID.
+    """
+    extracted_data = req.extracted_data or {}
+    compliance_report = req.compliance_report or {}
+
+    # Basic validation: ensure we have at least extracted_data or compliance_report or explicit status
+    if not extracted_data and not compliance_report and not req.compliance_status:
+        raise HTTPException(
+            status_code=422,
+            detail="Cannot save inspection: missing required compliance data or extracted fields.",
+        )
+
+    standard_fields = (
+        extracted_data.get("standard_fields", {})
+        if isinstance(extracted_data, dict)
+        else {}
+    )
+
+    # 1. Map product name: explicit or fallback to commodity_name
+    product_name = req.product_name
+    if not product_name and isinstance(standard_fields, dict):
+        product_name = standard_fields.get("commodity_name")
+
+    # 2. Map company / manufacturer: explicit or fallback to manufacturer
+    company_name = req.company_name
+    if not company_name and isinstance(standard_fields, dict):
+        company_name = standard_fields.get("manufacturer")
+
+    # 3. Map product category: explicit or fallback to compliance_report.product_category
+    product_category = req.product_category
+    if not product_category and isinstance(compliance_report, dict):
+        product_category = compliance_report.get("product_category")
+
+    # 4. Map overall compliance status
+    compliance_status = req.compliance_status
+    if not compliance_status:
+        if isinstance(compliance_report, dict):
+            if compliance_report.get("needs_secondary_image"):
+                compliance_status = "PENDING_SECONDARY"
+            elif compliance_report.get("is_compliant") is True:
+                compliance_status = "COMPLIANT"
+            elif compliance_report.get("is_compliant") is False:
+                compliance_status = "NON_COMPLIANT"
+            else:
+                compliance_status = "UNKNOWN"
+        else:
+            compliance_status = "UNKNOWN"
+
+    # 5. Map compliance score: explicit or fallback
+    compliance_score = req.compliance_score
+    if not compliance_score and isinstance(compliance_report, dict):
+        compliance_score = compliance_report.get("compliance_score")
+
+    # 6. Map violations: explicit or fallback to missing_mandatory_fields
+    violations = req.violations
+    if violations is None and isinstance(compliance_report, dict):
+        violations = compliance_report.get("missing_mandatory_fields", [])
+
+    # 7. Officer identity
+    officer_name = req.officer_name or get_current_officer()
+
+    inspection_payload = {
+        "inspection_id": req.inspection_id,
+        "session_id": req.session_id,
+        "officer_name": officer_name,
+        "timestamp": req.timestamp,
+        "company_name": company_name,
+        "product_name": product_name,
+        "product_category": product_category,
+        "latitude": req.latitude,
+        "longitude": req.longitude,
+        "compliance_status": compliance_status,
+        "compliance_score": compliance_score,
+        "extracted_data": extracted_data,
+        "compliance_report": compliance_report,
+        "violations": violations,
+        "image_reference": req.image_reference,
+    }
+
+    try:
+        saved_record = create_inspection(inspection_payload)
+        return saved_record
+    except DuplicateInspectionError as e:
+        raise HTTPException(
+            status_code=409,
+            detail=str(e),
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to persist inspection record: {str(e)}",
+        )
+
+
+@app.get("/inspections")
+async def list_inspections(
+    company: Optional[str] = None,
+    status: Optional[str] = None,
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+):
+    """
+    Retrieve inspection records with optional filtering by company and compliance status.
+    """
+    try:
+        return get_inspections(company=company, status=status, limit=limit, offset=offset)
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to query inspections: {str(e)}",
+        )
+
+
+@app.get("/inspections/{inspection_id}")
+async def get_single_inspection(inspection_id: str):
+    """
+    Retrieve one inspection in detail by its unique inspection ID.
+    """
+    try:
+        inspection = get_inspection_by_id(inspection_id)
+        if not inspection:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Inspection record '{inspection_id}' not found.",
+            )
+        return inspection
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to retrieve inspection: {str(e)}",
+        )
+
