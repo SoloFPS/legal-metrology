@@ -459,7 +459,7 @@ def seed_demo_data_if_needed() -> None:
             {
                 "id": "INSP-DEMO-001",
                 "session_id": "demo-sess-001",
-                "officer_name": "Inspector Rajesh Sharma",
+                "officer_name": "Inspector Chandru Narayanan",
                 "timestamp": "2026-10-15T11:20:00Z",
                 "company_name": "Hindustan Fast Foods Pvt Ltd",
                 "product_name": "Spiced Potato Chips 150g",
@@ -477,7 +477,7 @@ def seed_demo_data_if_needed() -> None:
             {
                 "id": "INSP-DEMO-002",
                 "session_id": "demo-sess-002",
-                "officer_name": "Inspector Rajesh Sharma",
+                "officer_name": "Inspector Chandru Narayanan",
                 "timestamp": "2026-10-15T14:45:00Z",
                 "company_name": "Northern Dairies & Agro Ltd",
                 "product_name": "Pasteurized Cow Milk 1L",
@@ -495,7 +495,7 @@ def seed_demo_data_if_needed() -> None:
             {
                 "id": "INSP-DEMO-003",
                 "session_id": "demo-sess-003",
-                "officer_name": "Inspector Priya Verma",
+                "officer_name": "Inspector Fathima",
                 "timestamp": "2026-10-16T09:15:00Z",
                 "company_name": "Apex Personal Care Products",
                 "product_name": "Herbal Hand Wash 250ml",
@@ -513,7 +513,7 @@ def seed_demo_data_if_needed() -> None:
             {
                 "id": "INSP-DEMO-004",
                 "session_id": "demo-sess-004",
-                "officer_name": "Inspector Priya Verma",
+                "officer_name": "Inspector Fathima",
                 "timestamp": "2026-10-16T12:30:00Z",
                 "company_name": "Maharashtra Confectioneries",
                 "product_name": "Choco Cream Biscuits 120g",
@@ -531,7 +531,7 @@ def seed_demo_data_if_needed() -> None:
             {
                 "id": "INSP-DEMO-005",
                 "session_id": "demo-sess-005",
-                "officer_name": "Inspector Priya Verma",
+                "officer_name": "Inspector Fathima",
                 "timestamp": "2026-10-16T15:10:00Z",
                 "company_name": "Western Beverages India",
                 "product_name": "Sparkling Natural Mineral Water 750ml",
@@ -549,7 +549,7 @@ def seed_demo_data_if_needed() -> None:
             {
                 "id": "INSP-DEMO-006",
                 "session_id": "demo-sess-006",
-                "officer_name": "Inspector Anand Patel",
+                "officer_name": "Inspector Subhaharini",
                 "timestamp": "2026-10-17T08:30:00Z",
                 "company_name": "Karnataka Spices & Condiments",
                 "product_name": "Garam Masala Blend 100g",
@@ -567,7 +567,7 @@ def seed_demo_data_if_needed() -> None:
             {
                 "id": "INSP-DEMO-007",
                 "session_id": "demo-sess-007",
-                "officer_name": "Inspector Anand Patel",
+                "officer_name": "Inspector Subhaharini",
                 "timestamp": "2026-10-17T11:00:00Z",
                 "company_name": "Southern Tea Processors Ltd",
                 "product_name": "Nilgiri Premium Leaf Tea 250g",
@@ -585,7 +585,7 @@ def seed_demo_data_if_needed() -> None:
             {
                 "id": "INSP-DEMO-008",
                 "session_id": "demo-sess-008",
-                "officer_name": "Inspector Anand Patel",
+                "officer_name": "Inspector Subhaharini",
                 "timestamp": "2026-10-17T13:40:00Z",
                 "company_name": "Apex Personal Care Products",
                 "product_name": "Glycerin Skin Moisturizer 200ml",

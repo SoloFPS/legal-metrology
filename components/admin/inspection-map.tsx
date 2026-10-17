@@ -109,19 +109,19 @@ export function InspectionMap({
         attributionControl: false,
       });
 
-      // Add CartoDB Dark Matter / OpenStreetMap tiles matching dark aesthetic
+      // Add standard OpenStreetMap tiles
       L.tileLayer(
-        "https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png",
+        "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
         {
           maxZoom: 19,
-          subdomains: "abcd",
+          attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
         }
       ).addTo(map);
 
       L.control
         .attribution({
           position: "bottomright",
-          prefix: '<span class="text-[10px] text-white/40">© OpenStreetMap & Legal Metrology</span>',
+          prefix: false,
         })
         .addTo(map);
 
@@ -294,7 +294,7 @@ export function InspectionMap({
           {/* Map Controls Overlay / Google Maps notice */}
           <div className="absolute top-3 right-3 z-[1000] flex flex-col gap-1.5">
             <div className="rounded-md border border-white/15 bg-black/75 px-2.5 py-1 text-[10px] text-white/70 backdrop-blur-md">
-              CartoDB & OpenStreetMap Active
+              OpenStreetMap Active
             </div>
             {process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY && (
               <div className="rounded-md border border-emerald-500/30 bg-emerald-950/80 px-2 py-0.5 text-[9px] text-emerald-300">

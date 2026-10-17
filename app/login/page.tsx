@@ -132,7 +132,7 @@ function LoginContent() {
                   type="text"
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
-                  placeholder="e.g. officer.sharma or admin"
+                  placeholder="e.g. officer.chandru or admin"
                   disabled={loading}
                   className="w-full rounded-lg border border-white/15 bg-white/[0.04] px-3.5 py-2.5 text-sm text-white placeholder-white/25 focus:border-emerald-500/60 focus:bg-white/[0.08] focus:outline-none focus:ring-1 focus:ring-emerald-500/60"
                 />

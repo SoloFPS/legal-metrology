@@ -14,32 +14,32 @@ export type OfficerUser = {
 export const DEMO_OFFICERS: OfficerUser[] = [
   {
     id: "OFF-001",
-    username: "officer.sharma",
-    name: "Inspector Rajesh Sharma",
+    username: "officer.chandru",
+    name: "Inspector Chandru Narayanan",
     role: "officer",
-    badge_number: "LM-DL-8821",
-    zone: "North Zone (Delhi)",
+    badge_number: "LM-TN-1889",
+    zone: "South Zone (Thirunelveli)",
   },
   {
     id: "OFF-002",
-    username: "officer.verma",
-    name: "Inspector Priya Verma",
+    username: "officer.fathima",
+    name: "Inspector Fathima",
     role: "officer",
-    badge_number: "LM-MH-4402",
-    zone: "West Zone (Mumbai)",
+    badge_number: "LM-TN-1890",
+    zone: "South Zone (Tiruppur)",
   },
   {
     id: "OFF-003",
-    username: "officer.patel",
-    name: "Inspector Anand Patel",
+    username: "officer.subha",
+    name: "Inspector Subhaharini",
     role: "officer",
-    badge_number: "LM-KA-7190",
-    zone: "South Zone (Bengaluru)",
+    badge_number: "LM-TN-1891",
+    zone: "South Zone (Erode)",
   },
   {
     id: "ADM-001",
     username: "admin",
-    name: "Dr. S. Nair (Chief Controller)",
+    name: "Prithvi S (Chief Controller)",
     role: "admin",
     badge_number: "CLM-HQ-001",
     zone: "Central Directorate (HQ)",
@@ -148,7 +148,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return {
       success: false,
       error:
-        "Invalid credentials. Please use demo credentials: officer.sharma / officer123 or admin / admin123.",
+        "Invalid credentials. Please use demo credentials: officer.chandru / officer123 or admin / admin123.",
     };
   };
 

@@ -697,7 +697,7 @@ export default function Home() {
                   onClick={() => loginAsDemo("OFF-001")}
                   className="bg-amber-500/20 border border-amber-500/40 text-amber-100 hover:bg-amber-500/30 text-xs h-7 cursor-pointer"
                 >
-                  Quick Sign-In (Insp. Sharma)
+                  Quick Sign-In (Insp. Chandru)
                 </Button>
                 <Link
                   href="/login"

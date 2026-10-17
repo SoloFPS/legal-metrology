@@ -1413,36 +1413,36 @@ async def create_inspection_record(req: InspectionCreateRequest):
 DEMO_OFFICERS = [
     {
         "id": "OFF-001",
-        "username": "officer.sharma",
+        "username": "officer.chandru",
         "password": "officer123",
-        "name": "Inspector Rajesh Sharma",
+        "name": "Inspector Chandru Narayanan",
         "role": "officer",
-        "badge_number": "LM-DL-8821",
-        "zone": "North Zone (Delhi)",
+        "badge_number": "LM-TN-1889",
+        "zone": "South Zone (Thirunelveli)",
     },
     {
         "id": "OFF-002",
-        "username": "officer.verma",
+        "username": "officer.fathima",
         "password": "officer123",
-        "name": "Inspector Priya Verma",
+        "name": "Inspector Fathima",
         "role": "officer",
-        "badge_number": "LM-MH-4402",
-        "zone": "West Zone (Mumbai)",
+        "badge_number": "LM-TN-1890",
+        "zone": "South Zone (Tiruppur)",
     },
     {
         "id": "OFF-003",
-        "username": "officer.patel",
+        "username": "officer.subha",
         "password": "officer123",
-        "name": "Inspector Anand Patel",
+        "name": "Inspector Subhaharini",
         "role": "officer",
-        "badge_number": "LM-KA-7190",
-        "zone": "South Zone (Bengaluru)",
+        "badge_number": "LM-TN-1891",
+        "zone": "South Zone (Erode)",
     },
     {
         "id": "ADM-001",
         "username": "admin",
         "password": "admin123",
-        "name": "Dr. S. Nair (Chief Controller)",
+        "name": "Prithvi S (Chief Controller)",
         "role": "admin",
         "badge_number": "CLM-HQ-001",
         "zone": "Central Directorate (HQ)",
@@ -1479,7 +1479,7 @@ async def login(req: LoginRequest):
 
     raise HTTPException(
         status_code=401,
-        detail="Invalid credentials. Use demo officer credentials (e.g. officer.sharma / officer123) or administrator (admin / admin123).",
+        detail="Invalid credentials. Use demo officer credentials (e.g. officer.chandru / officer123) or administrator (admin / admin123).",
     )
 
 
