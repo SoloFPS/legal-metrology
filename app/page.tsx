@@ -22,11 +22,16 @@ import {
   Camera,
   CameraOff,
   RotateCcw,
+  BarChart3,
+  ShieldAlert,
+  LogIn,
+  LogOut,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { useAuth } from "@/lib/auth-context";
 import {
   getStoredInspectionState,
   setStoredInspectionState,
@@ -194,6 +199,27 @@ export default function Home() {
     () => initialStore.savedInspectionId,
   );
   const [saveError, setSaveError] = useState<string | null>(null);
+
+  // Authenticated officer identity and geolocation
+  const { user, isAuthenticated, isLoading, logout, loginAsDemo } = useAuth();
+  const [coords, setCoords] = useState<{ latitude: number; longitude: number } | null>(null);
+
+  useEffect(() => {
+    if (typeof window !== "undefined" && "geolocation" in navigator) {
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          setCoords({
+            latitude: Number(pos.coords.latitude.toFixed(5)),
+            longitude: Number(pos.coords.longitude.toFixed(5)),
+          });
+        },
+        () => {
+          // Geolocation unavailable or permission not granted
+        },
+        { timeout: 6000 }
+      );
+    }
+  }, []);
 
   // Sync inspection state to singleton store on any update
   useEffect(() => {
@@ -518,12 +544,12 @@ export default function Home() {
 
       const payload = {
         session_id: analysisResult.session_id || undefined,
-        officer_name: DEFAULT_OFFICER_NAME,
+        officer_name: user?.name || DEFAULT_OFFICER_NAME,
         company_name: companyName,
         product_name: productName,
         product_category: productCategory,
-        latitude: null,
-        longitude: null,
+        latitude: coords?.latitude ?? null,
+        longitude: coords?.longitude ?? null,
         compliance_status: complianceStatus,
         compliance_score: complianceScore,
         extracted_data: analysisResult.extracted_data,
@@ -598,10 +624,53 @@ export default function Home() {
 
             <span className="text-sm text-white/30">/</span>
 
-            <span className="text-sm text-white/60">Compliance Checker</span>
+            <span className="text-sm text-white/60">Compliance Scanner</span>
           </div>
 
-          <div className="text-xs font-medium text-white/50">SIH 2026</div>
+          <div className="flex items-center gap-3">
+            <Link
+              href="/admin"
+              className="flex items-center gap-1.5 rounded-md border border-white/10 bg-white/5 px-2.5 py-1 text-xs font-medium text-white/80 transition hover:border-emerald-500/40 hover:bg-white/10 hover:text-white"
+            >
+              <BarChart3 className="h-3.5 w-3.5 text-emerald-400" />
+              <span>Admin Intelligence</span>
+            </Link>
+
+            {isAuthenticated && user ? (
+              <div className="flex items-center gap-2 pl-2 border-l border-white/10">
+                <div className="hidden sm:flex flex-col text-right">
+                  <span className="text-xs font-medium text-white">{user.name}</span>
+                  <span className="text-[10px] text-white/40">{user.badge_number || user.zone}</span>
+                </div>
+                <Badge
+                  className={
+                    user.role === "admin"
+                      ? "border-amber-500/30 bg-amber-500/20 text-[10px] text-amber-300"
+                      : "border-emerald-500/30 bg-emerald-500/20 text-[10px] text-emerald-300"
+                  }
+                >
+                  {user.role === "admin" ? "ADMIN" : "OFFICER"}
+                </Badge>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={logout}
+                  className="h-7 w-7 p-0 text-white/40 hover:bg-rose-500/10 hover:text-rose-400 cursor-pointer"
+                  title="Sign out officer"
+                >
+                  <LogOut className="h-3.5 w-3.5" />
+                </Button>
+              </div>
+            ) : (
+              <Link
+                href="/login"
+                className="flex items-center gap-1.5 rounded-md bg-emerald-600 px-3 py-1 text-xs font-medium text-white transition hover:bg-emerald-500"
+              >
+                <LogIn className="h-3.5 w-3.5" />
+                <span>Officer Sign-In</span>
+              </Link>
+            )}
+          </div>
         </div>
       </header>
 
@@ -610,6 +679,37 @@ export default function Home() {
       ───────────────────────────────────────────── */}
 
       <div className="mx-auto max-w-7xl px-6 py-10">
+        {!isAuthenticated && !isLoading && (
+          <div className="mb-6 rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-200">
+            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+              <div className="flex items-center gap-2.5">
+                <ShieldAlert className="h-5 w-5 shrink-0 text-amber-400" />
+                <div>
+                  <span className="font-semibold text-white">Officer Authentication Required</span>
+                  <p className="text-xs text-amber-200/80">
+                    Sign in to associate new inspections with an authorized officer and record legal findings.
+                  </p>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <Button
+                  size="sm"
+                  onClick={() => loginAsDemo("OFF-001")}
+                  className="bg-amber-500/20 border border-amber-500/40 text-amber-100 hover:bg-amber-500/30 text-xs h-7 cursor-pointer"
+                >
+                  Quick Sign-In (Insp. Sharma)
+                </Button>
+                <Link
+                  href="/login"
+                  className="rounded bg-amber-400 px-3 py-1 text-xs font-medium text-black hover:bg-amber-300 transition"
+                >
+                  All Accounts
+                </Link>
+              </div>
+            </div>
+          </div>
+        )}
+
         <div className="mb-8">
           <h1 className="text-3xl font-semibold tracking-tight text-white">
             Compliance Checker
@@ -1153,8 +1253,29 @@ export default function Home() {
                           </span>
                         )}
 
+                      {coords ? (
+                        <span
+                          className="inline-flex items-center gap-1 rounded border border-emerald-500/20 bg-emerald-500/10 px-2 py-0.5 text-[11px] text-emerald-300"
+                          title="Officer GPS coordinates acquired for geo-tagging inspection"
+                        >
+                          <MapPin className="h-3 w-3 text-emerald-400" />
+                          GPS: {coords.latitude}° N, {coords.longitude}° E
+                        </span>
+                      ) : (
+                        <span
+                          className="inline-flex items-center gap-1 rounded bg-white/5 px-2 py-0.5 text-[11px] text-white/40"
+                          title="GPS coordinates not detected or permission pending"
+                        >
+                          <MapPin className="h-3 w-3 text-white/30" />
+                          No GPS Tag
+                        </span>
+                      )}
+
                       {/* Official Save Inspection Button */}
                       <div className="ml-auto flex items-center gap-2">
+                        <span className="hidden md:inline text-[11px] text-white/40">
+                          Officer: <strong className="text-white/70">{user?.name || DEFAULT_OFFICER_NAME}</strong>
+                        </span>
                         {savedInspectionId ? (
                           <span className="inline-flex items-center gap-1 rounded border border-green-500/30 bg-green-500/10 px-2.5 py-1 text-xs font-medium text-green-400">
                             <ClipboardCheck className="h-3.5 w-3.5" />

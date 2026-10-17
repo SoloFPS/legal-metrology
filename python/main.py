@@ -1060,6 +1060,8 @@ try:
         create_inspection,
         get_inspections,
         get_inspection_by_id,
+        get_admin_analytics,
+        seed_demo_data_if_needed,
         DuplicateInspectionError,
     )
 except ImportError:
@@ -1068,13 +1070,16 @@ except ImportError:
         create_inspection,
         get_inspections,
         get_inspection_by_id,
+        get_admin_analytics,
+        seed_demo_data_if_needed,
         DuplicateInspectionError,
     )
 
 app = FastAPI()
 
-# Initialize persistent SQLite DB for inspection records
+# Initialize persistent SQLite DB for inspection records and seed initial demo data
 init_db()
+seed_demo_data_if_needed()
 
 app.add_middleware(
     CORSMiddleware,
@@ -1400,18 +1405,143 @@ async def create_inspection_record(req: InspectionCreateRequest):
         )
 
 
+# ==========================================
+# AUTHENTICATION & OFFICER IDENTITY
+# Seeded demo officer directory and prototype auth
+# ==========================================
+
+DEMO_OFFICERS = [
+    {
+        "id": "OFF-001",
+        "username": "officer.sharma",
+        "password": "officer123",
+        "name": "Inspector Rajesh Sharma",
+        "role": "officer",
+        "badge_number": "LM-DL-8821",
+        "zone": "North Zone (Delhi)",
+    },
+    {
+        "id": "OFF-002",
+        "username": "officer.verma",
+        "password": "officer123",
+        "name": "Inspector Priya Verma",
+        "role": "officer",
+        "badge_number": "LM-MH-4402",
+        "zone": "West Zone (Mumbai)",
+    },
+    {
+        "id": "OFF-003",
+        "username": "officer.patel",
+        "password": "officer123",
+        "name": "Inspector Anand Patel",
+        "role": "officer",
+        "badge_number": "LM-KA-7190",
+        "zone": "South Zone (Bengaluru)",
+    },
+    {
+        "id": "ADM-001",
+        "username": "admin",
+        "password": "admin123",
+        "name": "Dr. S. Nair (Chief Controller)",
+        "role": "admin",
+        "badge_number": "CLM-HQ-001",
+        "zone": "Central Directorate (HQ)",
+    },
+]
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+@app.post("/auth/login")
+async def login(req: LoginRequest):
+    """
+    Prototype authentication for Legal Metrology officers and administrators.
+    Supports seeded demo accounts with straightforward credentials.
+    """
+    clean_username = req.username.strip().lower()
+    clean_password = req.password.strip()
+
+    for user in DEMO_OFFICERS:
+        if (
+            user["username"].lower() == clean_username
+            or user["id"].lower() == clean_username
+        ) and user["password"] == clean_password:
+            user_data = {k: v for k, v in user.items() if k != "password"}
+            token = f"demo_token_{user['id']}_{uuid.uuid4().hex[:10]}"
+            return {
+                "token": token,
+                "user": user_data,
+                "message": "Authentication successful",
+            }
+
+    raise HTTPException(
+        status_code=401,
+        detail="Invalid credentials. Use demo officer credentials (e.g. officer.sharma / officer123) or administrator (admin / admin123).",
+    )
+
+
+@app.get("/auth/officers")
+async def list_demo_officers():
+    """Return seeded officer list for prototype demo selection."""
+    return [{k: v for k, v in u.items() if k != "password"} for u in DEMO_OFFICERS]
+
+
+@app.get("/auth/me")
+async def get_current_user_profile(token: Optional[str] = None):
+    """Retrieve profile from token, or return default active officer."""
+    if token:
+        for u in DEMO_OFFICERS:
+            if u["id"] in token:
+                return {k: v for k, v in u.items() if k != "password"}
+    # Fallback to first officer
+    return {k: v for k, v in DEMO_OFFICERS[0].items() if k != "password"}
+
+
+@app.get("/admin/analytics")
+async def get_inspection_intelligence():
+    """
+    Inspection intelligence analytics:
+    - Overview KPIs (Total, Compliant, Non-compliant, Violations, Average Score)
+    - Officer statistics (inspections, compliant, non-compliant, rate)
+    - Most violated rules (counts, percentage, legal basis)
+    - High-violation companies
+    - Geo-tagged inspection coordinates
+    """
+    try:
+        return get_admin_analytics()
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to generate inspection intelligence: {str(e)}",
+        )
+
+
 @app.get("/inspections")
 async def list_inspections(
     company: Optional[str] = None,
     status: Optional[str] = None,
+    officer: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
 ):
     """
-    Retrieve inspection records with optional filtering by company and compliance status.
+    Retrieve inspection records with optional filtering by company, compliance status, officer, and date range.
     """
     try:
-        return get_inspections(company=company, status=status, limit=limit, offset=offset)
+        return get_inspections(
+            company=company,
+            status=status,
+            officer=officer,
+            start_date=start_date,
+            end_date=end_date,
+            limit=limit,
+            offset=offset,
+        )
     except Exception as e:
         raise HTTPException(
             status_code=500,
@@ -1439,4 +1569,5 @@ async def get_single_inspection(inspection_id: str):
             status_code=500,
             detail=f"Failed to retrieve inspection: {str(e)}",
         )
+
 
