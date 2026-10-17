@@ -1,6 +1,6 @@
 "use client";
 
-import React, { createContext, useContext, useState } from "react";
+import React, { createContext, useContext, useState, useEffect } from "react";
 
 export type OfficerUser = {
   id: string;
@@ -67,26 +67,27 @@ const STORAGE_TOKEN_KEY = "legal_metrology_officer_token";
 const API_BASE = "http://127.0.0.1:8000";
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
-  const [user, setUser] = useState<OfficerUser | null>(() => {
-    if (typeof window === "undefined") return null;
+  const [user, setUser] = useState<OfficerUser | null>(null);
+  const [token, setToken] = useState<string | null>(null);
+  const [isLoading, setIsLoading] = useState<boolean>(true);
+
+  useEffect(() => {
     try {
       const savedUserStr = localStorage.getItem(STORAGE_USER_KEY);
-      return savedUserStr ? JSON.parse(savedUserStr) : null;
-    } catch {
-      return null;
+      const savedToken = localStorage.getItem(STORAGE_TOKEN_KEY);
+      if (savedUserStr) {
+        // eslint-disable-next-line react-hooks/set-state-in-effect
+        setUser(JSON.parse(savedUserStr));
+      }
+      if (savedToken) {
+        setToken(savedToken);
+      }
+    } catch (e) {
+      console.warn("Failed to restore session from localStorage", e);
+    } finally {
+      setIsLoading(false);
     }
-  });
-
-  const [token, setToken] = useState<string | null>(() => {
-    if (typeof window === "undefined") return null;
-    try {
-      return localStorage.getItem(STORAGE_TOKEN_KEY);
-    } catch {
-      return null;
-    }
-  });
-
-  const [isLoading] = useState<boolean>(false);
+  }, []);
 
   const saveSession = (newUser: OfficerUser, newToken: string) => {
     setUser(newUser);

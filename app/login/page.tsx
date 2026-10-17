@@ -13,7 +13,7 @@ function LoginContent() {
   const searchParams = useSearchParams();
   const redirectPath = searchParams.get("redirect") || "/";
 
-  const { user, login, loginAsDemo, logout, isAuthenticated } = useAuth();
+  const { user, login, loginAsDemo, logout, isAuthenticated, isLoading } = useAuth();
 
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -80,7 +80,7 @@ function LoginContent() {
         </div>
 
         {/* If user is already authenticated */}
-        {isAuthenticated && user && (
+        {!isLoading && isAuthenticated && user && (
           <Card className="mb-6 border-emerald-500/30 bg-[#161616]/90 p-5 backdrop-blur-md">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-3">

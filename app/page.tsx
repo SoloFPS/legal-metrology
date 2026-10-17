@@ -122,41 +122,34 @@ function getComplianceEvaluation(
   report: ComplianceReport | undefined,
   needsSecondary: boolean = false
 ): { isCompliant: boolean; statusText: string } {
-  if (needsSecondary || result?.status === "needs_secondary_image" || report?.needs_secondary_image) {
-    return { isCompliant: false, statusText: "Pending — 2nd image needed" };
-  }
-
   if (!report) {
     return { isCompliant: false, statusText: "Non-Compliant" };
   }
 
-  // 1. Explicit backend compliance_status check (preserving backend status, case-insensitive)
-  const explicitStatus = result?.compliance_status || report.compliance_status;
-  if (typeof explicitStatus === "string") {
-    const normalized = explicitStatus.trim().toUpperCase();
-    if (normalized === "COMPLIANT") {
-      return { isCompliant: true, statusText: "Compliant" };
-    }
-    if (normalized === "NON_COMPLIANT" || normalized === "NON-COMPLIANT") {
-      return { isCompliant: false, statusText: "Non-Compliant" };
-    }
-    if (normalized === "PENDING_SECONDARY") {
-      return { isCompliant: false, statusText: "Pending — 2nd image needed" };
-    }
+  const explicitStatus = (result?.compliance_status || report.compliance_status || "").trim().toUpperCase();
+
+  // 1. Pending secondary check (only if genuinely pending and not fulfilled)
+  if (
+    needsSecondary ||
+    result?.status === "needs_secondary_image" ||
+    report.needs_secondary_image === true ||
+    explicitStatus === "PENDING_SECONDARY"
+  ) {
+    return { isCompliant: false, statusText: "Pending — 2nd image needed" };
   }
 
-  // 2. Direct boolean is_compliant from backend compliance report
-  if (report.is_compliant === true) {
+  // 2. Explicit backend status check
+  if (explicitStatus === "COMPLIANT" || report.is_compliant === true) {
     return { isCompliant: true, statusText: "Compliant" };
   }
 
-  // 3. Score-derived & check-derived compliance:
-  // A compliance score of 100% or 0 missing mandatory fields is treated as compliant.
-  const scoreNum = parseFloat(String(report.compliance_score || "").replace("%", "").trim());
-  const has100Score = !isNaN(scoreNum) && scoreNum >= 100;
-  const noMissingFields = Array.isArray(report.missing_mandatory_fields) && report.missing_mandatory_fields.length === 0;
+  if (explicitStatus === "NON_COMPLIANT" || explicitStatus === "NON-COMPLIANT" || report.is_compliant === false) {
+    return { isCompliant: false, statusText: "Non-Compliant" };
+  }
 
-  if ((has100Score || noMissingFields) && !report.needs_secondary_image) {
+  // 3. Fallback based on missing mandatory fields
+  const noMissingFields = Array.isArray(report.missing_mandatory_fields) && report.missing_mandatory_fields.length === 0;
+  if (noMissingFields && !report.needs_secondary_image) {
     return { isCompliant: true, statusText: "Compliant" };
   }
 
@@ -636,7 +629,9 @@ export default function Home() {
               <span>Admin Intelligence</span>
             </Link>
 
-            {isAuthenticated && user ? (
+            {isLoading ? (
+              <div className="h-8 w-28 animate-pulse rounded-md bg-white/5" />
+            ) : isAuthenticated && user ? (
               <div className="flex items-center gap-2 pl-2 border-l border-white/10">
                 <div className="hidden sm:flex flex-col text-right">
                   <span className="text-xs font-medium text-white">{user.name}</span>

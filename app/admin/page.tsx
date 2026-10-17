@@ -225,7 +225,7 @@ export default function AdminPage() {
               onClick={() => loginAsDemo("ADM-001")}
               className="bg-emerald-600 hover:bg-emerald-500 text-white text-xs py-2"
             >
-              Sign In as Dr. S. Nair (Chief Controller)
+              Sign In as Prithvi S (Chief Controller)
             </Button>
             <Button
               variant="outline"
@@ -311,7 +311,7 @@ export default function AdminPage() {
             <div className="flex items-center gap-2">
               <Info className="h-4 w-4 text-amber-400" />
               <span>
-                You are currently signed in with field officer credentials (<strong>{user?.name}</strong>). To test administrative overrides and full intelligence actions, you may switch to Dr. S. Nair.
+                You are currently signed in with field officer credentials (<strong>{user?.name}</strong>). To test administrative overrides and full intelligence actions, you may switch to Prithvi S (Chief Controller).
               </span>
             </div>
             <Button

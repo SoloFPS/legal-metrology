@@ -288,7 +288,7 @@ EMAIL_REGEX = re.compile(r"\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b"
 # as an unspecified hint the user should be aware of.
 # ==========================================
 SECONDARY_LOCATION_REGEX = re.compile(
-    r"SEE\s+(NECK|CAP|BOTTOM|BACK|PACK(?:ET)?|CROWN|LID|REVERSE|BELOW|SIDE|LABEL|ELSEWHERE)",
+    r"SEE\s+(NECK|CAP|BOTTOM|BASE|BACK|PACK(?:ET)?|CROWN|LID|REVERSE|BELOW|SIDE|LABEL|ELSEWHERE|UNDERSIDE|TOP)",
     re.IGNORECASE,
 )
 FIELD_HINT_KEYWORDS = {
@@ -403,14 +403,19 @@ def detect_secondary_references(raw_texts: List[str]) -> List[Dict[str, str]]:
             continue
         location = loc_match.group(1).upper()
         text_upper = text.upper()
-        field_hint = "unspecified"
+        matched_fields = []
         for field_key, keywords in FIELD_HINT_KEYWORDS.items():
             if any(kw in text_upper for kw in keywords):
-                field_hint = field_key
-                break
-        hints.append(
-            {"field_hint": field_hint, "location": location, "source_text": text}
-        )
+                matched_fields.append(field_key)
+        if matched_fields:
+            for fk in matched_fields:
+                hints.append(
+                    {"field_hint": fk, "location": location, "source_text": text}
+                )
+        else:
+            hints.append(
+                {"field_hint": "unspecified", "location": location, "source_text": text}
+            )
     return hints
 
 
@@ -603,9 +608,15 @@ def validate_compliance(fields: Dict[str, Any], category: str) -> Dict[str, Any]
     required_fields = get_required_fields(category)
     missing_fields, warnings = [], []
 
+    # Check for placeholder values (e.g. "SEE BOTTOM")
+    unresolved_placeholders = []
     for field_key, display_name, _scope in required_fields:
-        if field_key not in fields or not fields[field_key]:
+        val = fields.get(field_key)
+        is_placeholder = isinstance(val, str) and val.upper().startswith("SEE ")
+        if val is None or not val or is_placeholder:
             missing_fields.append(display_name)
+            if is_placeholder:
+                unresolved_placeholders.append(field_key)
 
     if "mrp" in fields and fields["mrp"] and "SEE" in str(fields["mrp"]).upper():
         warnings.append(
@@ -628,13 +639,6 @@ def validate_compliance(fields: Dict[str, Any], category: str) -> Dict[str, Any]
             "actually apply if this isn't a food/beverage product."
         )
 
-    # A field can be missing for two very different reasons: it genuinely
-    # isn't printed on the pack (a real violation), or OCR just failed to
-    # read it (blur, small print, an awkward angle). We can't tell those
-    # apart automatically, so rather than silently reporting a possible
-    # false violation, flag it so a human double-checks the source photo
-    # before treating this as non-compliant. This does NOT change
-    # is_compliant/missing_mandatory_fields — it's advisory only.
     if missing_fields:
         warnings.append(
             "One or more mandatory fields were not detected in the OCR text: "
@@ -645,20 +649,42 @@ def validate_compliance(fields: Dict[str, Any], category: str) -> Dict[str, Any]
             "consumer-care block) often resolves this."
         )
 
-    needs_secondary_image = any(
-        isinstance(fields.get(field_key), str)
-        and fields[field_key].upper().startswith("SEE ")
-        for field_key, _display_name, _scope in required_fields
-    )
+    # Pending secondary image state:
+    # A secondary image is only genuinely needed if:
+    # 1. A required field is still an unresolved placeholder like "SEE BOTTOM", OR
+    # 2. There are missing required fields and an unspecified secondary hint (e.g. "See bottom for details")
+    needs_secondary_image = len(unresolved_placeholders) > 0
+    if not needs_secondary_image and missing_fields:
+        has_unspecified_hint = any(
+            h.get("field_hint") == "unspecified"
+            for h in (fields.get("_secondary_reference_hints") or [])
+        )
+        if has_unspecified_hint:
+            needs_secondary_image = True
+
+    # Filter active hints to only those that remain unresolved:
+    active_hints = []
+    if needs_secondary_image:
+        for hint in (fields.get("_secondary_reference_hints") or []):
+            fk = hint.get("field_hint")
+            if fk == "unspecified":
+                if missing_fields:
+                    active_hints.append(hint)
+            else:
+                val = fields.get(fk)
+                if isinstance(val, str) and val.upper().startswith("SEE "):
+                    active_hints.append(hint)
 
     denom = len(required_fields) if required_fields else 1
     compliance_percentage = ((denom - len(missing_fields)) / denom) * 100
     is_compliant = len(missing_fields) == 0 and not needs_secondary_image
-    compliance_status = (
-        "PENDING_SECONDARY"
-        if needs_secondary_image
-        else ("COMPLIANT" if is_compliant else "NON_COMPLIANT")
-    )
+
+    if needs_secondary_image:
+        compliance_status = "PENDING_SECONDARY"
+    elif is_compliant:
+        compliance_status = "COMPLIANT"
+    else:
+        compliance_status = "NON_COMPLIANT"
 
     return {
         "product_category": category,
@@ -670,7 +696,7 @@ def validate_compliance(fields: Dict[str, Any], category: str) -> Dict[str, Any]
         "compliance_score": f"{compliance_percentage:.0f}%",
         "missing_mandatory_fields": missing_fields,
         "needs_secondary_image": needs_secondary_image,
-        "secondary_image_hints": fields.get("_secondary_reference_hints", []),
+        "secondary_image_hints": active_hints,
         "warnings": warnings,
         "legal_basis": {
             display_name: LEGAL_BASIS.get(field_key, "")
